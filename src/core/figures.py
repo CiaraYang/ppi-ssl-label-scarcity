@@ -268,6 +268,9 @@ def main():
     fixed_lambda(main_rows, extra)
     xgboost_sensitivity(main_rows, extra, a2, a3_reference)
     print_summary(main_rows, reference, extra, a1, a2, a3_reference, study_rows, study_audits)
+    from improved import IMPROVED_DB
+    if IMPROVED_DB.exists():
+        improved_outputs()
 
 
 # Step 9: Final Test Evaluation (Written Only After 06_final_test.py Has Run Once)
@@ -289,3 +292,44 @@ def final_test_outputs():
                   f'SSL−Sup {pooled(w["SSL soft"]-w.Supervised)} | PPI−SSL {pooled(w["PPI selected"]-w["SSL soft"])} | '
                   'PPI−Sup by budget '+' / '.join(f'{by[b]:+.4f}' for b in BUDGETS))
 
+
+
+# Step 10: Improved Pipeline (improved_v1) — Same Six-Panel Template, Validation Only
+
+def improved_outputs():
+    from improved import IMPROVED_DB, STUDENTS
+    db = read_only(IMPROVED_DB)
+    try:
+        rows = pd.read_sql_query('SELECT mechanism,budget,seed,method,macro_f1 FROM metrics', db)
+        audits = [json.loads(a) for (a,) in db.execute("SELECT audit FROM cases WHERE status='complete'")]
+    finally:
+        db.close()
+    wide = rows.pivot_table(index=['mechanism', 'budget', 'seed'], columns='method', values='macro_f1')
+    fig, axes = six_panel([f'{s}\nMacro F1 − Supervised' for s in STUDENTS])
+    for row, student in enumerate(STUDENTS):
+        sup = wide[f'{student} / Supervised + threshold']
+        for column, mechanism in enumerate(MECHANISMS):
+            ax = axes[row, column]
+            zero_line(ax)
+            for method, color, marker, style in [('SSL soft', ORANGE, 's', '-'), ('PPI CV λ', AQUA, '^', '-'),
+                                                 ('PPI power λ', AQUA, 'v', '--')]:
+                d = (wide[f'{student} / {method} + threshold']-sup).loc[mechanism]
+                band(ax, d, f'{method} (Macro-F1 threshold)', color, marker, style)
+    finish(fig, axes, 'Improved pipeline: gain over Supervised on the same mask (selected Teacher, 5-fold, threshold rule; '
+           'validation; mean ± SD over 15 masks)', 'improved_gains.png')
+
+    print('\n=== Improved pipeline (improved_v1; validation only; 15 seeds) ===')
+    teachers = pd.Series([a['teacher']['teacher'] for a in audits]).value_counts()
+    print('Selected Teacher (final, per case): '+', '.join(f'{k} {v}' for k, v in teachers.items()))
+    for student in STUDENTS:
+        lam = pd.DataFrame([(a['n_labeled'], a['students'][student]['power_lambda']) for a in audits], columns=['budget', 'lam'])
+        print(f'\n{student}: power λ mean by budget '+' / '.join(f'{b}:{v:.2f}' for b, v in lam.groupby('budget').lam.mean().items()))
+        for rule in ['', ' + threshold']:
+            s = wide[f'{student} / Supervised{rule}']
+            label = 'threshold' if rule else 'argmax'
+            print(f'  [{label}] Supervised {s.mean():.4f} | '+' | '.join(
+                f'{m}−Sup {pooled(wide[f"{student} / {m}{rule}"]-s)}' for m in ['SSL soft', 'PPI CV λ', 'PPI power λ']))
+            by = (wide[f'{student} / PPI power λ{rule}']-s).groupby(level='budget').mean()
+            print(f'    PPI power λ−Sup by budget: '+' / '.join(f'{by[b]:+.4f}' for b in BUDGETS))
+        t = wide[f'{student} / Supervised + threshold']-wide[f'{student} / Supervised']
+        print(f'  Threshold rule effect on Supervised: {pooled(t)}')

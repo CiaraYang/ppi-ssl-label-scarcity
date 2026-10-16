@@ -18,6 +18,7 @@ from threadpoolctl import threadpool_limits
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'src'/'core'))
 from config import DEFAULT
 import ablations
+import improved
 import experiment
 import masking
 import model_utils as data
@@ -440,6 +441,76 @@ class FinalTestTests(unittest.TestCase):
         self.assertEqual(on_validation['students']['LR']['selected'], on_test['students']['LR']['selected'])
         self.assertEqual(on_validation['students']['LR']['cv'], on_test['students']['LR']['cv'])
         self.assertIn('teacher_test', on_test)
+
+
+# Step 8: Improved Pipeline Components (improved_v1)
+
+class ImprovedTests(unittest.TestCase):
+    setUp = ModelTests.setUp
+
+    def test_power_lambda_closed_form_and_informative_teacher(self):
+        settings = replace(FAST, student_models=('LR',), student_model='LR', cv_folds=5)
+        perfect = np.eye(4)[self.y]  # g_f = g_Y, so tr Cov = tr Var and λ* = 1/(1 + n/N).
+        lam = improved.power_lambda(self.XL, self.y, perfect, np.ones(40), 24, settings)
+        self.assertAlmostEqual(lam, 1/(1+40/24), places=10)
+        informative = .7*np.eye(4)[self.y]+.3*self.qL  # Cross-fitted residuals keep a useful Teacher's λ above 0.
+        self.assertGreater(improved.power_lambda(self.XL, self.y, informative, np.ones(40), 24, settings), 0)
+
+    def test_temperature_scaling_reduces_oof_log_loss(self):
+        rng = np.random.default_rng(1)
+        y = rng.integers(0, 4, 400)
+        logits = rng.normal(size=(400, 4))+1.5*np.eye(4)[y]
+        overconfident = core.softmax(4*logits, axis=1)
+        t = improved.fit_temperature(overconfident, y, np.ones(400))
+        self.assertGreater(t, 1)
+        self.assertLess(improved.weighted_log_loss(improved.temper(overconfident, t), y, np.ones(400)),
+                        improved.weighted_log_loss(overconfident, y, np.ones(400)))
+        zero = overconfident.copy(); zero[:, 3] = 0; zero /= zero.sum(axis=1, keepdims=True)
+        np.testing.assert_array_equal(improved.temper(zero, t)[:, 3], 0.)
+
+    def test_threshold_rule_never_lowers_out_of_fold_macro_f1(self):
+        rng = np.random.default_rng(2)
+        y = rng.integers(0, 4, 300)
+        P = core.softmax(rng.normal(size=(300, 4))+np.eye(4)[y]*np.array([2., .3, .3, 1.]), axis=1)
+        bias = improved.fit_bias(P, y, np.ones(300))
+        self.assertEqual(bias[0], 0.)
+        self.assertGreaterEqual(core.macro_f1(y, improved.biased(P, bias).argmax(axis=1)), core.macro_f1(y, P.argmax(axis=1)))
+
+    def test_balanced_teacher_gives_each_class_equal_weight(self):
+        seen = {}
+        class Spy:
+            def __init__(self, **kwargs): pass
+            def fit(self, X, y, sample_weight=None):
+                seen['weights'], seen['y'] = sample_weight, y
+                self.classes_ = np.unique(y)
+        y = np.array([0]*30+[1]*6+[2]*3+[3]*11)
+        with patch.object(core, 'CatBoostClassifier', Spy):
+            core.fit_teacher(pd.DataFrame({'v': range(50)}), y, np.ones(50), config=replace(FAST, teacher_model='CatBoostBalanced'))
+        totals = np.bincount(seen['y'], weights=seen['weights'])
+        np.testing.assert_allclose(totals, totals[0])
+
+    def test_leaf_refit_structure_uses_labeled_rows_only(self):
+        case = data.load_case(masking.generate_mask(100, 42, 'MCAR'))
+        trained = []
+        real = improved.xgb.train
+        def spy(params, dtrain, **kwargs):
+            trained.append(dtrain.num_row())
+            return real(params, dtrain, **kwargs)
+        with patch.object(improved.xgb, 'train', side_effect=spy):
+            XL, XU, XV = improved.student_design('XGBoost leaf-refit', case.X, case.y, case.labeled_weights, case.U, case.V,
+                                                 replace(improved.CONFIG, tree_iterations=5))
+        self.assertEqual(trained, [len(case.y)])
+        self.assertEqual(XL.shape[1], XU.shape[1])
+        self.assertEqual(XL.shape[1], XV.shape[1])
+        self.assertEqual((XL.shape[0], XU.shape[0], XV.shape[0]), (len(case.y), len(case.U), len(case.V)))
+
+    def test_improved_case_runs_without_full_or_test_labels(self):
+        config = replace(improved.CONFIG, cv_folds=3, teacher_iterations=5, tree_iterations=5)
+        with patch.object(experiment, 'full_training_data', side_effect=AssertionError('Full labels leaked')):
+            rows, audit = improved.run_improved_case(100, 'MCAR', 42, config)
+        self.assertEqual(len(rows), 1+len(improved.STUDENTS)*len(improved.METHODS)*2)
+        self.assertIn(audit['teacher']['teacher'], ['CatBoost', 'CatBoostBalanced', 'LR', 'Ensemble'])
+        self.assertTrue(all(0 <= r['macro_f1'] <= 1 for r in rows))
 
 if __name__ == '__main__':
     unittest.main()

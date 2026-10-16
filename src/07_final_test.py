@@ -1,4 +1,4 @@
-# Step 6: Frozen One-Shot Test Evaluation (Run Only After the Method Is Final; Never Repeated)
+# Step 7: Frozen One-Shot Test Evaluation (Run Only After the Method Is Final; Never Repeated)
 
 import sys
 from pathlib import Path

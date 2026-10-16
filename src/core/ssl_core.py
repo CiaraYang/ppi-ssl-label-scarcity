@@ -129,6 +129,10 @@ def fit_teacher(X, y, wl, seed=42, config=DEFAULT):
     teacher = CatBoostClassifier(iterations=config.teacher_iterations, depth=6, learning_rate=.05,
                                  loss_function='MultiClass', cat_features=tuple(CATEGORICAL_FEATURES),
                                  random_seed=seed, thread_count=1, verbose=False, allow_writing_files=False)
+    if config.teacher_model == 'CatBoostBalanced':
+        # Equal total weight per observed class, computed from the visible labels of this fit only.
+        counts = np.bincount(y, minlength=K)
+        wl = np.asarray(wl, dtype=float)*len(y)/(len(classes)*counts[y])
     teacher.fit(X, y, sample_weight=normalized(wl))
     return teacher, teacher.classes_.astype(int)
 
@@ -146,7 +150,7 @@ def teacher_probabilities(model, table, classes):
 
 def fold_teacher(X, y, wl, U, seed=42, config=DEFAULT):
     """Fit one Teacher on one fold's visible labels; return aligned four-class probabilities for any table."""
-    if config.teacher_model == 'CatBoost':
+    if config.teacher_model in ('CatBoost', 'CatBoostBalanced'):
         teacher, classes = fit_teacher(prepare_catboost_features(X), y, wl, seed, config)
         return lambda table: teacher_probabilities(teacher, prepare_catboost_features(table), classes)
     # Same-architecture Teacher: the Student's own supervised fit and settings, preprocessed per fold.
