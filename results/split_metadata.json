@@ -1,0 +1,16 @@
+{
+  "protocol": "fixed_counts_v4",
+  "seed": 42,
+  "duplicate_policy": "one exact-record representative; prefer original test, then validation, then train",
+  "excluded_duplicate_ids": [
+    "INC023492",
+    "INC031519"
+  ],
+  "split_counts": {
+    "train": 22586,
+    "test": 4841,
+    "validation": 4840
+  },
+  "natural_missing_targets": 4742,
+  "scope": "synthetic masking on originally labeled four-class records; raw CSV unchanged"
+}
