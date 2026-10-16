@@ -1,6 +1,6 @@
-# CS 680 — Classification with Missing Labels
+# Evaluating Prediction-Powered Semi-Supervised Learning under Label Scarcity and Non-Random Label Missingness
 
-This project asks whether unlabeled training data improve four-class `Aircraft_Damage_Type` classification when only **50, 100, 200, 500 or 1,000 training labels** are visible. It compares Supervised learning, soft pseudo-label SSL and **PPI-inspired rectified training** under MCAR, MAR and MNAR label missingness. This is a machine-learning classification study, not statistical inference.
+CS 680 project. It asks whether unlabeled training data improve four-class `Aircraft_Damage_Type` classification when only **50, 100, 200, 500 or 1,000 training labels** are visible. It compares Supervised learning, soft pseudo-label SSL and **PPI-inspired rectified training** under MCAR, MAR and MNAR label missingness. This is a machine-learning classification study, not statistical inference.
 
 ## Run order
 
