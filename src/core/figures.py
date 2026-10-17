@@ -153,9 +153,10 @@ def teacher_quality(main, audits, study_audits, extra):
             band(ax, by_case(refit, mechanism), 'CatBoost Teacher refit on all visible labels', TEACHER_GRAY, 'D', '--')
             band(ax, by_case(same, mechanism), 'Same-architecture Teacher (cross-fit)', VIOLET, 'v', '-.')
             if student == 'LR' and mechanism in TABPFN_GRID['mechanisms'] and not tabpfn.empty:
-                band(ax, by_case(tabpfn, mechanism), 'TabPFN-3.5 Teacher (pretrained; cross-fit)', TEACHER_GRAY, 'X', '-')
+                # Darker gray = the pretrained Teacher (pilot: MCAR, 100 and 500 labels only).
+                band(ax, by_case(tabpfn, mechanism), 'TabPFN-3.5 Teacher (pretrained; cross-fit)', MUTED, 'X', '-')
                 band(ax, by_case(tabpfn, mechanism, 'alone'), 'TabPFN-3.5 alone (all visible labels as context)',
-                     TEACHER_GRAY, 'P', (0, (1, 1)))
+                     MUTED, 'P', ':')
     finish(fig, axes, 'Teacher quality: each Teacher vs the Student trained Supervised '
            '(validation Macro F1; mean ± SD over 5 masks)', 'teacher_quality.png')
 
