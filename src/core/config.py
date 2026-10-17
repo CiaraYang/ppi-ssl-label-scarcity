@@ -33,8 +33,8 @@ class Config:
             raise ValueError('Supported Students are LR and XGBoost.')
         if self.student_C <= 0 or self.cv_folds < 2:
             raise ValueError('Use a positive C and at least two CV folds.')
-        if self.teacher_model not in {'CatBoost', 'CatBoostBalanced', 'LR', 'XGBoost'}:
-            raise ValueError('Supported Teachers are CatBoost, CatBoostBalanced, LR and XGBoost.')
+        if self.teacher_model not in {'CatBoost', 'LR', 'XGBoost', 'TabPFN'}:
+            raise ValueError('Supported Teachers are CatBoost, LR, XGBoost and the pretrained TabPFN.')
         if self.design_fit not in {'labeled', 'labeled+unlabeled'}:
             raise ValueError('Fit preprocessing on labeled features, or on labeled plus unlabeled features.')
         if not 0 < self.selection_ratio < 1:

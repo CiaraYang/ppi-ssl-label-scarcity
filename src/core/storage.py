@@ -27,6 +27,29 @@ def fingerprint(config=DEFAULT):
             'evaluation': 'fixed validation/development set; test performance not evaluated'}
 
 
+def fingerprint_differences(old, new):
+    """What changed between two fingerprints: config fields, data/split hashes, versions, source files."""
+    changed = [f'config.{k}' for k in sorted(set(old.get('config', {})) | set(new.get('config', {})))
+               if old.get('config', {}).get(k) != new.get('config', {}).get(k)]
+    changed += [key for key in ['data_sha256', 'split_sha256', 'versions', 'evaluation'] if old.get(key) != new.get(key)]
+    old_src, new_src = old.get('source_sha256', {}), new.get('source_sha256', {})
+    changed += sorted(f'src/core/{name}' for name in set(old_src) | set(new_src) if old_src.get(name) != new_src.get(name))
+    return changed
+
+
+def stored_fingerprint_warning(path, key='fingerprint', config=DEFAULT):
+    """Read-only check used when a finished study is skipped: never silent about version differences."""
+    db = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
+    try:
+        row = db.execute('SELECT value FROM metadata WHERE key=?', (key,)).fetchone()
+    finally:
+        db.close()
+    if row is None:
+        return ' WARNING: no stored fingerprint.'
+    changed = fingerprint_differences(json.loads(row[0]), json.loads(dumps(fingerprint(config))))
+    return f' WARNING: stored results predate changes to {changed}; see README (replay checks).' if changed else ''
+
+
 @contextmanager
 def connect(path=DB_PATH):
     Path(path).parent.mkdir(parents=True, exist_ok=True)

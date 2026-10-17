@@ -1,0 +1,21 @@
+id,claim,contrast,metric,mu,diff,ci_low,ci_high,ok,verdict
+R1,"In group B, Classic SSL is worse than Only Labeled once the Teacher is badly biased",Classic SSL − Only Labeled,mse_b,3.0,6.09967,5.62329,6.51341,True,reproduced
+R1,"In group B, Classic SSL is worse than Only Labeled once the Teacher is badly biased",Classic SSL − Only Labeled,mse_b,5.0,20.85346,19.74585,21.74517,True,reproduced
+R1,"In group B, Classic SSL is worse than Only Labeled once the Teacher is badly biased",Classic SSL − Only Labeled,mse_b,7.0,43.05894,40.97941,44.75225,True,reproduced
+R2,"In group B, PP-SSL is better than Classic SSL under strong bias",PP-SSL (online λ) − Classic SSL,mse_b,3.0,-6.17071,-6.56491,-5.72094,True,reproduced
+R2,"In group B, PP-SSL is better than Classic SSL under strong bias",PP-SSL (online λ) − Classic SSL,mse_b,5.0,-20.94693,-21.80507,-19.88424,True,reproduced
+R2,"In group B, PP-SSL is better than Classic SSL under strong bias",PP-SSL (online λ) − Classic SSL,mse_b,7.0,-43.13085,-44.76363,-41.12577,True,reproduced
+R3,"Overall, PP-SSL is no worse than Only Labeled at any bias",PP-SSL (online λ) − Only Labeled,mse,0.1,-0.10465,-0.18399,-0.04548,True,reproduced
+R3,"Overall, PP-SSL is no worse than Only Labeled at any bias",PP-SSL (online λ) − Only Labeled,mse,1.0,-0.08323,-0.14485,-0.03734,True,reproduced
+R3,"Overall, PP-SSL is no worse than Only Labeled at any bias",PP-SSL (online λ) − Only Labeled,mse,3.0,-0.04615,-0.07183,-0.02286,True,reproduced
+R3,"Overall, PP-SSL is no worse than Only Labeled at any bias",PP-SSL (online λ) − Only Labeled,mse,5.0,-0.04138,-0.07177,-0.01500,True,reproduced
+R3,"Overall, PP-SSL is no worse than Only Labeled at any bias",PP-SSL (online λ) − Only Labeled,mse,7.0,-0.02676,-0.06588,0.00569,True,reproduced
+R4,The online λ decreases as the Teacher bias grows (λ at μ=7 below λ at μ=0.1),PP-SSL (online λ) − λ at μ=0.1,lambda,7.0 vs 0.1,-0.02298,-0.04607,-0.00499,True,reproduced
+R5,PP-SSL is close to the best fixed λ (total MSE within 5%),PP-SSL (online λ) − best fixed λ,mse,0.1,0.92906,0.75427,1.14048,False,NOT reproduced
+R5,PP-SSL is close to the best fixed λ (total MSE within 5%),PP-SSL (online λ) − best fixed λ,mse,1.0,0.90603,0.73747,1.11076,False,NOT reproduced
+R5,PP-SSL is close to the best fixed λ (total MSE within 5%),PP-SSL (online λ) − best fixed λ,mse,3.0,0.69687,0.52566,0.89714,False,NOT reproduced
+R5,PP-SSL is close to the best fixed λ (total MSE within 5%),PP-SSL (online λ) − best fixed λ,mse,5.0,0.39173,0.24562,0.56348,False,NOT reproduced
+R5,PP-SSL is close to the best fixed λ (total MSE within 5%),PP-SSL (online λ) − best fixed λ,mse,7.0,0.14646,-0.01015,0.31898,False,NOT reproduced
+R6,"PP-SSL beats PPI++ with offline-tuned λ (total MSE, strong bias)",PP-SSL (online λ) − PPI++ (offline λ),mse,3.0,0.02437,-0.01000,0.05808,False,NOT reproduced
+R6,"PP-SSL beats PPI++ with offline-tuned λ (total MSE, strong bias)",PP-SSL (online λ) − PPI++ (offline λ),mse,5.0,0.01751,-0.02132,0.05707,False,NOT reproduced
+R6,"PP-SSL beats PPI++ with offline-tuned λ (total MSE, strong bias)",PP-SSL (online λ) − PPI++ (offline λ),mse,7.0,0.01807,-0.02574,0.06169,False,NOT reproduced

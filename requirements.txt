@@ -7,3 +7,4 @@ joblib==1.6.0
 threadpoolctl==3.7.0
 matplotlib==3.11.2
 xgboost==3.4.1
+tabpfn==9.2.0  # optional: TabPFN-3.5 Teacher pilot (pulls in torch; weights need a one-time licence login)

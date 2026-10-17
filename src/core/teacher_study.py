@@ -12,7 +12,7 @@ from joblib import Parallel, delayed, parallel_config
 from config import DEFAULT
 from experiment import run_case
 from model_utils import DB_PATH, RESULTS_DIR
-from storage import dumps, fingerprint
+from storage import dumps, fingerprint, fingerprint_differences, stored_fingerprint_warning
 
 STUDY_DB = RESULTS_DIR / 'teacher_study.sqlite'
 PROTOCOL = 'teacher_study_v1'
@@ -72,14 +72,15 @@ def pending_tasks():
 
 def run_study(workers=8):
     if not pending_tasks():
-        print('Teacher study already complete; nothing to run.', flush=True)
+        print('Teacher study already complete; nothing to run.'+stored_fingerprint_warning(STUDY_DB), flush=True)
         return
     db = connect()
     try:
         previous = db.execute("SELECT value FROM metadata WHERE key='fingerprint'").fetchone()
         current = json.loads(dumps(fingerprint()))
         if previous is not None and json.loads(previous[0]) != current:
-            raise ValueError('Source/data changed since this study started; move teacher_study.sqlite aside to rerun.')
+            raise ValueError(f'Source/data changed since this study started ({fingerprint_differences(json.loads(previous[0]), current)}); '
+                             'move teacher_study.sqlite aside to rerun rather than mixing versions.')
         for key, value in [('fingerprint', current), ('protocol', PROTOCOL),
                            ('variants', [variant_name(*v) for v in VARIANTS])]:
             db.execute('INSERT OR REPLACE INTO metadata VALUES(?,?)', (key, dumps(value)))
@@ -174,10 +175,114 @@ def cv_selected_teacher(rows, audits, student, design):
     return pd.DataFrame(choices)
 
 
+# Step 5: Exploratory Pretrained-Teacher Pilot — TabPFN-3.5 → LR (MCAR, 100 and 500 Labels, Validation Only)
+
+TABPFN_DB = RESULTS_DIR / 'tabpfn_teacher.sqlite'
+TABPFN_VARIANT = ('TabPFN', 'LR', 'labeled')
+TABPFN_GRID = {'mechanisms': ['MCAR'], 'budgets': [100, 500], 'seeds': list(DEFAULT.seeds)}
+# Stored before the first result. Added after the main validation results were known, so it is exploratory.
+TABPFN_DECLARATION = {
+    'name': 'tabpfn_teacher_pilot_v1', 'declared_on': '2026-10-17', 'role': 'exploratory; main study unchanged',
+    'question': 'Is the small PPI gain because a Teacher learned from the same few labels carries no extra information?',
+    'teacher': 'TabPFN-3.5 (tabpfn-v3.5-20260909.safetensors; pretrained purely on synthetic tabular tasks; research '
+               'licence) with the fold\'s visible labels as context; cross-fitted and nested in training CV exactly like '
+               'the CatBoost Teacher; unweighted (TabPFN takes no sample weights), hence MCAR only',
+    'everything else': 'identical to the main study: same masks, LR Student, preprocessing, SSL/PPI grids and CV rule',
+    'expectations': ['TabPFN Teacher Macro F1 > cross-fitted CatBoost Teacher on the same masks',
+                     'TabPFN Teacher Macro F1 > Supervised LR Student at 100 labels',
+                     'PPI − Supervised larger with TabPFN than with CatBoost (descriptive: 5 masks per budget)',
+                     'SSL soft gains more than PPI with this stronger Teacher (as in the synthetic positive control)',
+                     'The LR Student stays below TabPFN alone if TabPFN is strong (LR is capped near 0.637 fully labeled)'],
+}
+
+
+def tabpfn_fingerprint():
+    import importlib.metadata
+    return {**json.loads(dumps(fingerprint(variant_config(*TABPFN_VARIANT)))), 'declaration': TABPFN_DECLARATION,
+            'tabpfn_version': importlib.metadata.version('tabpfn'), 'torch_version': importlib.metadata.version('torch')}
+
+
+def run_tabpfn_pilot():
+    keys = list(product(TABPFN_GRID['mechanisms'], TABPFN_GRID['budgets'], TABPFN_GRID['seeds']))
+    name = variant_name(*TABPFN_VARIANT)
+    db = connect(TABPFN_DB)
+    try:
+        done = {tuple(r) for r in db.execute("SELECT mechanism,budget,seed FROM cases WHERE status='complete'")}
+        if set(keys) <= done:
+            print('TabPFN Teacher pilot already complete; nothing to run.', flush=True)
+            return
+        current = tabpfn_fingerprint()
+        previous = db.execute("SELECT value FROM metadata WHERE key='fingerprint'").fetchone()
+        if previous is not None and json.loads(previous[0]) != current:
+            raise ValueError('Source, data or TabPFN version changed since the pilot started; move tabpfn_teacher.sqlite aside.')
+        for key, value in [('fingerprint', current), ('declaration', TABPFN_DECLARATION)]:
+            db.execute('INSERT OR REPLACE INTO metadata VALUES(?,?)', (key, dumps(value)))
+        db.commit()
+        main = read_only_main_supervised()
+        tasks = [key for key in keys if key not in done]
+        print(f'{len(tasks)} TabPFN Teacher cases to run sequentially (one Apple-GPU/CPU process)', flush=True)
+        for count, key in enumerate(tasks, 1):
+            _, _, rows, audit, error = evaluate(TABPFN_VARIANT, key)
+            if not error:  # TabPFN alone: all visible labels as context (the deployable Teacher-only predictor).
+                audit['tabpfn_refit_validation'] = tabpfn_alone(*key)
+            if not error:  # The Supervised Student never sees the Teacher: it must equal the main study exactly.
+                supervised = next(r for r in rows if r['method'].endswith('/ Supervised'))['macro_f1']
+                if supervised != main[key]:
+                    error = f'ReplayMismatch: Supervised {supervised} differs from the main study {main[key]}'
+            with db:
+                db.execute('DELETE FROM metrics WHERE variant=? AND mechanism=? AND budget=? AND seed=?', (name, *key))
+                db.execute('INSERT OR REPLACE INTO cases VALUES(?,?,?,?,?,?,?)',
+                           (name, *key, 'failed' if error else 'complete', dumps(audit), error))
+                if not error:
+                    db.executemany('INSERT INTO metrics VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)', [
+                        (name, *key, row['method'].split(' / ')[1], row['accuracy'], row['macro_f1'],
+                         row['balanced_accuracy'], row['log_loss'], dumps(row['class_f1']),
+                         row['delta_f1'], row['lambda_value'], row['weight']) for row in rows])
+            print(f'[{count}/{len(tasks)}] {key} {"FAILED: "+error if error else "saved"} '
+                  f'({audit.get("elapsed_seconds", 0):.0f} s)', flush=True)
+        failed = db.execute("SELECT COUNT(*) FROM cases WHERE status!='complete'").fetchone()[0]
+    finally:
+        db.close()
+    if failed:
+        raise RuntimeError(f'{failed} TabPFN Teacher cases failed; see {TABPFN_DB.name}.')
+
+
+def tabpfn_alone(mechanism, budget, seed):
+    from masking import generate_mask
+    from model_utils import load_case
+    from ssl_core import score, tabpfn_teacher
+    data = load_case(generate_mask(budget, seed, mechanism))
+    return score(tabpfn_teacher(data.X, data.y, seed)(data.V), data.vy)
+
+
+def read_only_main_supervised():
+    db = sqlite3.connect(f'file:{DB_PATH}?mode=ro', uri=True)
+    try:
+        return {(m, b, s): f for m, b, s, f in
+                db.execute("SELECT mechanism,budget,seed,macro_f1 FROM metrics WHERE method='LR / Supervised'")}
+    finally:
+        db.close()
+
+
+def load_tabpfn():
+    """TabPFN pilot rows and audits (read-only), or empty results if the pilot has not been run."""
+    if not TABPFN_DB.exists():
+        return pd.DataFrame(), {}
+    db = sqlite3.connect(f'file:{TABPFN_DB}?mode=ro', uri=True)
+    try:
+        rows = pd.read_sql_query('SELECT * FROM metrics', db)
+        audits = {(m, b, s): json.loads(a) for m, b, s, a in
+                  db.execute("SELECT mechanism,budget,seed,audit FROM cases WHERE status='complete'")}
+    finally:
+        db.close()
+    return rows, audits
+
+
 def main():
-    parser = argparse.ArgumentParser(description='Same-architecture Teachers and label-free preprocessing.')
+    parser = argparse.ArgumentParser(description='Same-architecture Teachers, label-free preprocessing and the TabPFN pilot.')
     parser.add_argument('--workers', type=int, default=8)
     run_study(parser.parse_args().workers)
+    run_tabpfn_pilot()
 
 
 if __name__ == '__main__':

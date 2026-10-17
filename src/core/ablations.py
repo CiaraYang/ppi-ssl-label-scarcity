@@ -18,7 +18,8 @@ from masking import generate_mask
 from model_utils import DB_PATH, RESULTS_DIR, load_case, prepare_catboost_features
 from ssl_core import (K, NonEstimableCandidate, crossfit_teacher, fit_student, fit_teacher,
                       prepare_design, probabilities, score, teacher_probabilities)
-from storage import connect, dumps, initialize, read_results, save_case, set_metadata
+from storage import (connect, dumps, fingerprint, fingerprint_differences, initialize, read_results, save_case,
+                     set_metadata, stored_fingerprint_warning)
 
 ABLATION_DB = RESULTS_DIR / 'ablations.sqlite'
 PROTOCOL = 'ablation_v1'
@@ -147,7 +148,8 @@ def run_ablations(budgets, mechanisms, seeds, workers=2, fresh=False):
     if fresh:
         ABLATION_DB.unlink(missing_ok=True)
     if not pending('cases', product(mechanisms, budgets, seeds)):
-        print('A1 (Teacher replay, Teacher-only, fixed λ=1) already complete; nothing to run.', flush=True)
+        print('A1 (Teacher replay, Teacher-only, fixed λ=1) already complete; nothing to run.'
+              +stored_fingerprint_warning(ABLATION_DB), flush=True)
         return
     audits, metrics = read_main_study()
     with connect(ABLATION_DB) as db:
@@ -233,13 +235,29 @@ def save_extra(db, table, key, rows, audit, error=None):
                         for row in rows])
 
 
+def require_same_version(name):
+    """A partially finished ablation may only resume under the source/config/data it started with."""
+    if not ABLATION_DB.exists():
+        return
+    db = sqlite3.connect(f'file:{ABLATION_DB}?mode=ro', uri=True)
+    try:
+        row = db.execute('SELECT value FROM metadata WHERE key=?', (f'{name}_fingerprint',)).fetchone()
+    finally:
+        db.close()
+    if row is not None:
+        changed = fingerprint_differences(json.loads(row[0]), json.loads(dumps(fingerprint())))
+        if changed:
+            raise ValueError(f'{name.upper()} started under different source/data ({changed}); rerun it from scratch.')
+
+
 def run_extra(name, grid, worker, arguments, workers=2):
     """Run one later ablation into its own case table; A1 rows and the A1 fingerprint stay untouched."""
-    from storage import fingerprint
     table = f'{name}_cases'
     if not pending(table, product(grid['mechanisms'], grid['budgets'], grid['seeds'])):
-        print(f'{name.upper()} already complete; nothing to run.', flush=True)
+        print(f'{name.upper()} already complete; nothing to run.'
+              +stored_fingerprint_warning(ABLATION_DB, f'{name}_fingerprint'), flush=True)
         return
+    require_same_version(name)
     with connect(ABLATION_DB) as db:
         db.execute(f'CREATE TABLE IF NOT EXISTS {table}(mechanism TEXT, budget INTEGER, seed INTEGER, status TEXT, '
                    'audit TEXT, error TEXT, PRIMARY KEY(mechanism,budget,seed))')
@@ -313,8 +331,9 @@ def evaluate_capacity(key, stored_main):
 
 def run_a3(workers=2):
     if not pending('a3_cases', product(A2_GRID['mechanisms'], A2_GRID['budgets'], A2_GRID['seeds'])):
-        print('A3 already complete; nothing to run.', flush=True)
+        print('A3 already complete; nothing to run.'+stored_fingerprint_warning(ABLATION_DB, 'a3_fingerprint'), flush=True)
         return
+    require_same_version('a3')
     _, metrics = read_main_study()
     db = sqlite3.connect(f'file:{DB_PATH}?mode=ro', uri=True)
     try:

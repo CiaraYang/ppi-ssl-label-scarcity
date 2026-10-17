@@ -129,10 +129,6 @@ def fit_teacher(X, y, wl, seed=42, config=DEFAULT):
     teacher = CatBoostClassifier(iterations=config.teacher_iterations, depth=6, learning_rate=.05,
                                  loss_function='MultiClass', cat_features=tuple(CATEGORICAL_FEATURES),
                                  random_seed=seed, thread_count=1, verbose=False, allow_writing_files=False)
-    if config.teacher_model == 'CatBoostBalanced':
-        # Equal total weight per observed class, computed from the visible labels of this fit only.
-        counts = np.bincount(y, minlength=K)
-        wl = np.asarray(wl, dtype=float)*len(y)/(len(classes)*counts[y])
     teacher.fit(X, y, sample_weight=normalized(wl))
     return teacher, teacher.classes_.astype(int)
 
@@ -148,9 +144,41 @@ def teacher_probabilities(model, table, classes):
     return probability
 
 
+def tabpfn_teacher(X, y, seed=42):
+    """Pretrained TabPFN-3.5 (synthetic-only pretraining) with this fold's visible labels as its context.
+    Categories are coded from the fold's own rows; TabPFN takes no sample weights, so it is unweighted (MCAR only)."""
+    import sys
+    if 'xgboost' in sys.modules and 'torch' not in sys.modules:
+        # On macOS, XGBoost's OpenMP runtime loaded before PyTorch's makes TabPFN segfault; load torch first.
+        raise RuntimeError('Import torch before xgboost in this process to use the TabPFN Teacher.')
+    import torch
+    from sklearn.preprocessing import OrdinalEncoder
+    from tabpfn import TabPFNClassifier
+    from model_utils import NUMERIC_FEATURES
+    coder = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=np.nan, encoded_missing_value=np.nan)
+    coder.fit(X[CATEGORICAL_FEATURES].astype(object).fillna('Unknown'))
+    def encode(table):
+        return np.hstack([table[NUMERIC_FEATURES].to_numpy(float),
+                          coder.transform(table[CATEGORICAL_FEATURES].astype(object).fillna('Unknown'))])
+    classes = np.unique(y)
+    if len(classes) == 1:
+        return lambda table: teacher_probabilities(None, table, classes)
+    model = TabPFNClassifier(device='mps' if torch.backends.mps.is_available() else 'cpu', random_state=seed,
+                             categorical_features_indices=list(range(len(NUMERIC_FEATURES), X.shape[1])))
+    model.fit(encode(X), y)
+    def predict(table):
+        probability = np.zeros((len(table), K))
+        if len(table):
+            probability[:, model.classes_.astype(int)] = model.predict_proba(encode(table))
+        return probability
+    return predict
+
+
 def fold_teacher(X, y, wl, U, seed=42, config=DEFAULT):
     """Fit one Teacher on one fold's visible labels; return aligned four-class probabilities for any table."""
-    if config.teacher_model in ('CatBoost', 'CatBoostBalanced'):
+    if config.teacher_model == 'TabPFN':
+        return tabpfn_teacher(X, y, seed)
+    if config.teacher_model == 'CatBoost':
         teacher, classes = fit_teacher(prepare_catboost_features(X), y, wl, seed, config)
         return lambda table: teacher_probabilities(teacher, prepare_catboost_features(table), classes)
     # Same-architecture Teacher: the Student's own supervised fit and settings, preprocessed per fold.

@@ -1,4 +1,4 @@
-# Step 5: Draw All Figures From the Saved Databases and Print the Key Results
+# Step 6: Draw All Figures From the Saved Databases and Print the Key Results
 
 import sys
 from pathlib import Path

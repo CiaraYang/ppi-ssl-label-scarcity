@@ -1,0 +1,8 @@
+question,group,contrast,n_masks,mean,se,boot_low,boot_high,better,worse,equal,ppi_minus_ssl,teacher_macro_f1,teacher_minus_supervised
+"Q0 main: CatBoost Teacher, CV λ, labeled-only preprocessing",main,PPI − own Supervised,75,0.00184,0.00112,-0.00000,0.00380,33,19,23,0.00703,0.47649,-0.03758
+Q1 Teacher: LR Teacher instead of CatBoost (also changes Teacher quality),teacher,PPI − own Supervised,75,0.00264,0.00121,0.00047,0.00478,37,23,15,0.00528,0.49850,-0.01557
+"Q2 λ: CatBoost Teacher, λ fixed at 1 (A1)",lambda,PPI − own Supervised,75,0.00276,0.00198,-0.00037,0.00619,41,34,0,0.00795,0.47649,-0.03758
+"Q3 preprocessing: CatBoost Teacher, labeled+unlabeled features",design,PPI − own Supervised,75,0.00170,0.00118,-0.00017,0.00373,30,20,25,0.00632,0.47649,-0.03758
+"Q3 preprocessing: LR Teacher, labeled+unlabeled features",design,PPI − own Supervised,75,0.00178,0.00114,-0.00019,0.00383,32,23,20,0.00419,0.49849,-0.01558
+Q3 preprocessing effect on Supervised itself (labeled+unlabeled − labeled),design,Supervised(l+u) − Supervised(labeled),75,-0.00026,0.00023,-0.00062,0.00010,35,31,9,,,
+Q4 Teacher chosen per mask by training CV (CatBoost vs LR; candidate Test rule),teacher,PPI − own Supervised,75,0.00159,0.00116,-0.00036,0.00358,38,24,13,,,

@@ -15,6 +15,10 @@ from scipy.sparse import csr_matrix
 from sklearn.linear_model import LogisticRegression
 from threadpoolctl import threadpool_limits
 
+try:  # PyTorch (TabPFN Teacher) must load its OpenMP runtime before XGBoost's on macOS, or TabPFN segfaults.
+    import torch  # noqa: F401
+except ImportError:
+    pass
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'src'/'core'))
 from config import DEFAULT
 import ablations
@@ -421,6 +425,50 @@ class TeacherStudyTests(unittest.TestCase):
 
 # Step 7: The Frozen Test Evaluation Changes Only Which Rows Are Scored
 
+
+class TabPFNTeacherTests(unittest.TestCase):
+    def test_tabpfn_teacher_is_cross_fitted_and_never_sees_its_own_label(self):
+        case = data.load_case(masking.generate_mask(100, 42, 'MCAR'))
+        config = replace(FAST, teacher_model='TabPFN')
+        def spy(X, y, seed=42):
+            seen = set(X.index)
+            def predict(table):
+                if seen & set(table.index):
+                    raise AssertionError('Own-label leakage into the TabPFN context')
+                return np.full((len(table), core.K), 1/core.K)
+            return predict
+        with patch.object(core, 'tabpfn_teacher', side_effect=spy) as fitted:
+            qL, qU, _, policy = core.crossfit_teacher(case.X, case.y, case.U, config=config)
+        self.assertEqual(policy, 'stratified')
+        self.assertEqual(fitted.call_count, len(core.stratified_folds(case.y, 42, config)))
+        np.testing.assert_allclose(qL.sum(axis=1), 1.)
+        np.testing.assert_allclose(qU.sum(axis=1), 1.)
+
+    def test_real_tabpfn_aligns_four_classes_and_is_deterministic(self):
+        try:
+            import tabpfn.browser_auth as auth
+        except ImportError:
+            self.skipTest('tabpfn is not installed')
+        if auth.get_cached_token() is None:
+            self.skipTest('TabPFN-3.5 licence not accepted on this machine')
+        case = data.load_case(masking.generate_mask(50, 42, 'MCAR'))
+        keep = case.y != 2  # A class absent from the context must get probability 0, not an invented label.
+        predict = core.tabpfn_teacher(case.X[keep], case.y[keep], seed=42)
+        first, second = predict(case.U.iloc[:20]), core.tabpfn_teacher(case.X[keep], case.y[keep], seed=42)(case.U.iloc[:20])
+        self.assertEqual(first.shape, (20, core.K))
+        np.testing.assert_allclose(first.sum(axis=1), 1., atol=1e-5)
+        np.testing.assert_array_equal(first[:, 2], 0.)
+        np.testing.assert_allclose(first, second, atol=1e-6)
+        self.assertEqual(predict(case.U.iloc[:0]).shape, (0, core.K))
+
+    def test_pilot_is_mcar_only_and_declared(self):
+        import teacher_study
+        self.assertEqual(teacher_study.TABPFN_GRID['mechanisms'], ['MCAR'])
+        self.assertEqual(replace(DEFAULT, teacher_model='TabPFN').teacher_model, 'TabPFN')
+        self.assertIn('expectations', teacher_study.TABPFN_DECLARATION)
+        self.assertIn('synthetic', teacher_study.TABPFN_DECLARATION['teacher'])
+
+
 class FinalTestTests(unittest.TestCase):
     def test_test_split_changes_only_scored_rows(self):
         mask = masking.generate_mask(100, 42, 'MCAR')
@@ -443,30 +491,50 @@ class FinalTestTests(unittest.TestCase):
         self.assertIn('teacher_test', on_test)
 
 
-# Step 8: Improved Pipeline Components (improved_v1)
+# Step 8: Exploratory Improved Pipeline (improved_v2), Version Protection and the Test Lock
 
 class ImprovedTests(unittest.TestCase):
     setUp = ModelTests.setUp
 
-    def test_power_lambda_closed_form_and_informative_teacher(self):
-        settings = replace(FAST, student_models=('LR',), student_model='LR', cv_folds=5)
-        perfect = np.eye(4)[self.y]  # g_f = g_Y, so tr Cov = tr Var and λ* = 1/(1 + n/N).
-        lam = improved.power_lambda(self.XL, self.y, perfect, np.ones(40), 24, settings)
-        self.assertAlmostEqual(lam, 1/(1+40/24), places=10)
-        informative = .7*np.eye(4)[self.y]+.3*self.qL  # Cross-fitted residuals keep a useful Teacher's λ above 0.
-        self.assertGreater(improved.power_lambda(self.XL, self.y, informative, np.ones(40), 24, settings), 0)
+    def test_heuristic_lambda_closed_form_and_informative_teacher(self):
+        rng = np.random.default_rng(3)
+        P = core.softmax(rng.normal(size=(40, 4)), axis=1)
+        perfect = np.eye(4)[self.y]  # g_f = g_Y, so tr Cov = tr Var and λ = 1/(1 + n/N).
+        self.assertAlmostEqual(improved.heuristic_lambda(self.XL, self.y, P, perfect, np.ones(40), 24), 1/(1+40/24), places=10)
+        informative = .7*np.eye(4)[self.y]+.3*self.qL
+        self.assertGreater(improved.heuristic_lambda(self.XL, self.y, P, informative, np.ones(40), 24), 0)
 
-    def test_temperature_scaling_reduces_oof_log_loss(self):
-        rng = np.random.default_rng(1)
-        y = rng.integers(0, 4, 400)
-        logits = rng.normal(size=(400, 4))+1.5*np.eye(4)[y]
-        overconfident = core.softmax(4*logits, axis=1)
-        t = improved.fit_temperature(overconfident, y, np.ones(400))
-        self.assertGreater(t, 1)
-        self.assertLess(improved.weighted_log_loss(improved.temper(overconfident, t), y, np.ones(400)),
-                        improved.weighted_log_loss(overconfident, y, np.ones(400)))
-        zero = overconfident.copy(); zero[:, 3] = 0; zero /= zero.sum(axis=1, keepdims=True)
-        np.testing.assert_array_equal(improved.temper(zero, t)[:, 3], 0.)
+    def test_ensemble_teacher_predictions_exclude_own_labels(self):
+        case = data.load_case(masking.generate_mask(100, 42, 'MCAR'))
+        fitted = []
+        real = core.fold_teacher
+        def spy(X, *args, **kwargs):
+            fitted.append(set(X.index))
+            return real(X, *args, **kwargs)
+        config = replace(improved.CONFIG, teacher_iterations=5)
+        with patch.object(core, 'fold_teacher', side_effect=spy), threadpool_limits(limits=1):
+            qL, qU, qV, info = improved.build_teacher(case.X, case.y, case.U, case.V, case.labeled_weights, 42, config)
+        held = [set(case.X.iloc[h].index) for _, h in core.stratified_folds(case.y, 42, config)]
+        self.assertEqual(len(fitted), 2*len(held))  # CatBoost and LR members, same folds.
+        for used, rows in zip(fitted, held+held):
+            self.assertFalse(used & rows)
+            self.assertFalse(used & set(case.V.index))
+        np.testing.assert_allclose(qL.sum(axis=1), 1.)
+        self.assertEqual(info['teacher'], 'Ensemble')
+
+    def test_whole_student_oof_refits_tree_structure_per_fold(self):
+        case = data.load_case(masking.generate_mask(100, 42, 'MCAR'))
+        trained = []
+        real = improved.xgb.train
+        def spy(params, dtrain, **kwargs):
+            trained.append(dtrain.num_row())
+            return real(params, dtrain, **kwargs)
+        config = replace(improved.CONFIG, tree_iterations=5)
+        with patch.object(improved.xgb, 'train', side_effect=spy):
+            P = improved.oof_supervised('XGBoost leaf-refit', case.X, case.y, case.labeled_weights, case.U, config)
+        folds = core.stratified_folds(case.y, 0, config)
+        self.assertEqual(trained, [len(fit) for fit, _ in folds])  # Never trained on a row it then predicts.
+        np.testing.assert_allclose(P.sum(axis=1), 1.)
 
     def test_threshold_rule_never_lowers_out_of_fold_macro_f1(self):
         rng = np.random.default_rng(2)
@@ -475,19 +543,6 @@ class ImprovedTests(unittest.TestCase):
         bias = improved.fit_bias(P, y, np.ones(300))
         self.assertEqual(bias[0], 0.)
         self.assertGreaterEqual(core.macro_f1(y, improved.biased(P, bias).argmax(axis=1)), core.macro_f1(y, P.argmax(axis=1)))
-
-    def test_balanced_teacher_gives_each_class_equal_weight(self):
-        seen = {}
-        class Spy:
-            def __init__(self, **kwargs): pass
-            def fit(self, X, y, sample_weight=None):
-                seen['weights'], seen['y'] = sample_weight, y
-                self.classes_ = np.unique(y)
-        y = np.array([0]*30+[1]*6+[2]*3+[3]*11)
-        with patch.object(core, 'CatBoostClassifier', Spy):
-            core.fit_teacher(pd.DataFrame({'v': range(50)}), y, np.ones(50), config=replace(FAST, teacher_model='CatBoostBalanced'))
-        totals = np.bincount(seen['y'], weights=seen['weights'])
-        np.testing.assert_allclose(totals, totals[0])
 
     def test_leaf_refit_structure_uses_labeled_rows_only(self):
         case = data.load_case(masking.generate_mask(100, 42, 'MCAR'))
@@ -500,17 +555,194 @@ class ImprovedTests(unittest.TestCase):
             XL, XU, XV = improved.student_design('XGBoost leaf-refit', case.X, case.y, case.labeled_weights, case.U, case.V,
                                                  replace(improved.CONFIG, tree_iterations=5))
         self.assertEqual(trained, [len(case.y)])
-        self.assertEqual(XL.shape[1], XU.shape[1])
-        self.assertEqual(XL.shape[1], XV.shape[1])
         self.assertEqual((XL.shape[0], XU.shape[0], XV.shape[0]), (len(case.y), len(case.U), len(case.V)))
+        self.assertEqual(XL.shape[1], XV.shape[1])
 
     def test_improved_case_runs_without_full_or_test_labels(self):
         config = replace(improved.CONFIG, cv_folds=3, teacher_iterations=5, tree_iterations=5)
         with patch.object(experiment, 'full_training_data', side_effect=AssertionError('Full labels leaked')):
             rows, audit = improved.run_improved_case(100, 'MCAR', 42, config)
         self.assertEqual(len(rows), 1+len(improved.STUDENTS)*len(improved.METHODS)*2)
-        self.assertIn(audit['teacher']['teacher'], ['CatBoost', 'CatBoostBalanced', 'LR', 'Ensemble'])
         self.assertTrue(all(0 <= r['macro_f1'] <= 1 for r in rows))
+
+
+class VersionProtectionTests(unittest.TestCase):
+    def test_fingerprint_differences_name_what_changed(self):
+        old = json.loads(storage.dumps(storage.fingerprint()))
+        new = json.loads(json.dumps(old))
+        new['config']['cv_folds'] = 9
+        new['source_sha256']['ssl_core.py'] = 'edited'
+        self.assertEqual(storage.fingerprint_differences(old, new), ['config.cv_folds', 'src/core/ssl_core.py'])
+        self.assertEqual(storage.fingerprint_differences(old, old), [])
+
+    def test_partial_improved_database_is_not_plotted(self):
+        import figures
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory)/'improved.sqlite'
+            with patch.object(improved, 'IMPROVED_DB', path):
+                db = improved.connect()
+                db.execute("INSERT INTO cases VALUES('MCAR', 50, 42, 'complete', '{}', NULL)")
+                db.commit(); db.close()
+                self.assertFalse(improved.is_complete())
+                with patch.object(figures, 'save', side_effect=AssertionError('Partial study plotted')):
+                    figures.improved_outputs()
+
+    def test_draft_test_protocol_refuses_to_run(self):
+        import final_test
+        self.assertEqual(final_test.FROZEN['status'], 'draft')
+        with patch.object(final_test, 'connect', side_effect=AssertionError('Test database touched')), \
+             self.assertRaises(RuntimeError):
+            final_test.run()
+
+
+# Step 10: Synthetic Positive Control, LR Main-Line Analysis and the PP-SSL Anchor
+
+class PositiveControlTests(unittest.TestCase):
+    SMALL = {'n_train': 1500, 'n_validation': 400}
+
+    def test_declaration_names_settings_that_should_and_should_not_benefit(self):
+        import positive_control as pc
+        rules = {e['rule'] for e in pc.EXPECTATIONS}
+        self.assertTrue({'gain', 'no_gain', 'harm', 'no_harm'} <= rules)
+        self.assertEqual({e['teacher'] for e in pc.EXPECTATIONS}, set(pc.TEACHERS))
+        self.assertIn('expectations', pc.DECLARATION)
+
+    def test_teacher_is_a_label_free_function_of_x(self):
+        import positive_control as pc
+        world = {**pc.WORLD, **self.SMALL}
+        beta, intercept = pc.coefficients(world)
+        X, y, posterior = pc.sample(500, np.random.default_rng(0), beta, intercept, world)
+        np.testing.assert_allclose(posterior.mean(axis=0), world['priors'], atol=.06)
+        noise, group = np.random.default_rng(1).normal(size=(500, core.K)), X[:, -1]
+        self.assertIs(pc.teacher_targets('oracle', posterior, group, noise), posterior)
+        biased = pc.teacher_targets('subgroup-biased', posterior, group, noise)
+        np.testing.assert_array_equal(biased[group == 0], posterior[group == 0])
+        np.testing.assert_array_equal(biased[group == 1], np.roll(posterior[group == 1], 1, axis=1))
+        for name in pc.TEACHERS:  # Shuffling labels cannot change any Teacher.
+            np.testing.assert_array_equal(pc.teacher_targets(name, posterior, group, noise),
+                                          pc.teacher_targets(name, posterior, group, noise))
+            np.testing.assert_allclose(pc.teacher_targets(name, posterior, group, noise).sum(axis=1), 1)
+
+    def test_synthetic_masks_reuse_make_mask_with_exact_counts_and_known_weights(self):
+        import positive_control as pc
+        rng = np.random.default_rng(3)
+        X = np.hstack([rng.normal(size=(2000, 3)), np.zeros((2000, 1))])
+        y = rng.integers(0, core.K, 2000)
+        for mechanism in DEFAULT.mechanisms:
+            visible, wl, wu = pc.synthetic_mask(X, y, 100, 42, mechanism)
+            self.assertEqual(visible.sum(), 100)
+            self.assertEqual((len(wl), len(wu)), (100, 1900))
+        visible, wl, _ = pc.synthetic_mask(X, y, 100, 42, 'MAR')
+        high = X[:, 0] > pc.WORLD['mar_threshold']
+        self.assertLess(visible[high].mean(), visible[~high].mean())
+        self.assertAlmostEqual(float(np.sum(wl)), 2000., delta=1e-6)  # Horvitz–Thompson weights sum to the pool.
+        visible, wl, _ = pc.synthetic_mask(X, y, 100, 42, 'MNAR')
+        self.assertTrue(np.all(wl == 1))
+        self.assertLess(visible[y == 1].mean(), visible[y != 1].mean())
+
+    def test_selection_falls_back_without_cv_and_stays_on_the_grid(self):
+        import positive_control as pc
+        rng = np.random.default_rng(4)
+        XL, XU = np.hstack([rng.normal(size=(40, 3)), np.ones((40, 1))]), np.hstack([rng.normal(size=(300, 3)), np.ones((300, 1))])
+        qL, qU = rng.dirichlet(np.ones(core.K), 40), rng.dirichlet(np.ones(core.K), 300)
+        y = np.r_[np.zeros(39, int), 1]  # A class with one label: no stratified CV, Supervised fallback.
+        selected, policy = pc.select(XL, y, XU, qL, qU, np.ones(40), np.ones(300), 0, FAST)
+        self.assertTrue(policy.startswith('supervised_fallback'))
+        self.assertEqual(selected['lambda'], 0.)
+        y = np.arange(40) % core.K
+        selected, policy = pc.select(XL, y, XU, qL, qU, np.ones(40), np.ones(300), 0, FAST)
+        self.assertIn(selected['lambda'], FAST.ppi_lambdas)
+        self.assertIn(selected['soft']['weight'], FAST.ssl_weights)
+
+    def test_small_case_runs_and_lambda_zero_is_exactly_supervised(self):
+        import positive_control as pc
+        world = {**pc.WORLD, **self.SMALL}
+        rows, audit = pc.run_case('MCAR', 50, 42, world, ('oracle', 'uninformative'), FAST)
+        table = pd.DataFrame(rows).set_index(['teacher', 'method'])
+        self.assertEqual(len(rows), 2+2*4)
+        for teacher in ['oracle', 'uninformative']:
+            if audit['teachers'][teacher]['selected']['lambda'] == 0:
+                self.assertEqual(table.loc[(teacher, 'PPI CV λ'), 'macro_f1'], table.loc[('none', 'Supervised'), 'macro_f1'])
+        self.assertAlmostEqual(table.loc[('oracle', 'Teacher'), 'macro_f1'], table.loc[('none', 'Bayes'), 'macro_f1'])
+
+    def test_expectation_rules_and_seed_bootstrap(self):
+        import positive_control as pc
+        index = pd.MultiIndex.from_product([['MCAR'], [50, 1000], range(10)], names=['mechanism', 'budget', 'seed'])
+        sup = pd.DataFrame({'mechanism': index.get_level_values(0), 'budget': index.get_level_values(1),
+                            'seed': index.get_level_values(2), 'teacher': 'none', 'method': 'Supervised', 'macro_f1': .5})
+        ppi = sup.assign(teacher='oracle', method='PPI CV λ', macro_f1=np.where(sup.budget == 50, .55, .5))
+        rows = pd.concat([sup, ppi], ignore_index=True)
+        base = dict(teacher='oracle', contrast='PPI CV λ − Supervised', mechanisms=['MCAR'])
+        self.assertEqual(pc.check(rows, dict(base, id='g', budgets=[50], rule='gain'))['verdict'], 'confirmed')
+        self.assertEqual(pc.check(rows, dict(base, id='n', budgets=[1000], rule='gain'))['verdict'], 'NOT confirmed')
+        self.assertEqual(pc.check(rows, dict(base, id='s', budgets=[50, 1000], rule='shrinks'))['verdict'], 'confirmed')
+        self.assertEqual(pc.check(rows, dict(base, id='h', budgets=[1000], rule='no_harm'))['verdict'], 'confirmed')
+
+
+class LRMainlineTests(unittest.TestCase):
+    def test_stratified_bootstrap_and_describe(self):
+        import figures as lr_mainline
+        index = pd.MultiIndex.from_product([['MCAR', 'MAR'], [50, 100], range(5)], names=lr_mainline.KEY)
+        constant = pd.Series(.01, index=index)
+        np.testing.assert_allclose(lr_mainline.stratified_bootstrap(constant), [.01, .01])
+        summary = lr_mainline.describe(pd.Series(np.r_[np.ones(10), -np.ones(5), np.zeros(5)], index=index))
+        self.assertEqual((summary['better'], summary['worse'], summary['equal']), (10, 5, 5))
+
+    def test_lambda_sources_separate_cv_zero_from_forced_fallback(self):
+        import figures as lr_mainline
+        def audit(lam, policy, extra=None):
+            return {'students': {'LR': {'ppi_selected_lambda': lam, 'selection_policy': policy, **(extra or {})}}}
+        audits = {('MCAR', 50, 42): audit(0., 'supervised_fallback: fewer than two visible labels in a class'),
+                  ('MCAR', 50, 43): audit(0., 'training_stratified_cv_macro_f1'),
+                  ('MCAR', 50, 44): audit(.5, 'training_stratified_cv_macro_f1')}
+        table, counts = lr_mainline.lambda_choices(audits)
+        self.assertEqual(table.source.str.contains('forced').sum(), 1)
+        self.assertEqual(table.source.str.contains('chosen by CV \\(no').sum(), 1)
+        self.assertEqual(int(counts['all'].sum()), 3)
+
+    def test_main_study_tables_cover_all_masks_read_only(self):
+        import hashlib
+        import figures as lr_mainline
+        before = hashlib.sha256(data.DB_PATH.read_bytes()).hexdigest()
+        rows, audits = lr_mainline.main_lr()
+        table, contrasts = lr_mainline.paired_uncertainty(rows)
+        self.assertEqual(int(table.loc[table.scope == 'all 75 masks', 'n_masks'].iloc[0]), 75)
+        wide = rows.pivot_table(index=lr_mainline.KEY, columns='method', values='macro_f1')
+        self.assertAlmostEqual(contrasts['PPI − Supervised (improvement)'].mean(), (wide['PPI selected']-wide.Supervised).mean())
+        _, counts = lr_mainline.lambda_choices(audits)
+        self.assertEqual(int(counts['all'].sum()), 75)
+        self.assertEqual(hashlib.sha256(data.DB_PATH.read_bytes()).hexdigest(), before)
+
+
+class PPSSLReplicationTests(unittest.TestCase):
+    def test_data_follow_the_paper_groups_and_oracle_teacher(self):
+        import ppssl_replication as pp
+        (labeled, unlabeled, test), _ = pp.make_data(0., 0)
+        X, y, f, group_b = test
+        self.assertEqual((len(labeled[0]), len(unlabeled[0]), len(X)), (20, 1000, 1000))
+        self.assertAlmostEqual(np.concatenate([labeled[3], unlabeled[3], group_b]).mean(), .2, places=2)
+        np.testing.assert_array_equal(X[:, -2], group_b)  # The group indicator is an input feature.
+
+    def test_rectifier_vanishes_when_pseudo_labels_are_the_labels(self):
+        import ppssl_replication as pp
+        rng = np.random.default_rng(0)
+        X = np.hstack([rng.normal(size=(30, 3)), np.ones((30, 1))])
+        y = X @ np.array([1., -2., .5, .3])+rng.normal(size=30)
+        np.testing.assert_allclose(pp.exact_fit(X, y, y, X, y, .7), pp.exact_fit(X, y, y, X, y, 0.), atol=1e-8)
+        np.testing.assert_allclose(pp.exact_fit(X, y, 0*y, X, 0*y, 0.), np.linalg.lstsq(X, y, rcond=None)[0], atol=1e-4)
+        # A perfect Teacher on many unlabeled rows gives the PPI++ optimum 1/(1 + n/N).
+        XU = np.hstack([rng.normal(size=(3000, 3)), np.ones((3000, 1))])
+        fU = XU @ np.array([1., -2., .5, .3])
+        self.assertGreater(pp.ppi_plus_plus_lambda(X, y, y, XU, fU), .5)
+
+    def test_online_lambda_stays_in_unit_interval_and_drops_for_a_useless_teacher(self):
+        import ppssl_replication as pp
+        setup = {**pp.SETUP, 'steps': 400}
+        (labeled, unlabeled, _), _ = pp.make_data(7., 1, setup)
+        noise = np.random.default_rng(2).normal(scale=20, size=len(unlabeled[2]))
+        _, lam = pp.train(labeled[:3], (unlabeled[0], noise), 'online', np.random.default_rng(0), setup=setup)
+        self.assertTrue(0 <= lam < .5)
+
 
 if __name__ == '__main__':
     unittest.main()

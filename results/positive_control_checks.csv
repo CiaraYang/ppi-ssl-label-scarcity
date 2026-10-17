@@ -1,0 +1,12 @@
+id,teacher,contrast,metric,scope,rule,n_pairs,estimate,ci_low,ci_high,verdict
+E1,oracle,PPI CV λ − Supervised,macro_f1,MCAR+MAR @ 50/100/200,gain,60,0.03264,0.02960,0.03563,confirmed
+E2,oracle,PPI λ=1 − Supervised,macro_f1,MCAR+MAR @ 50/100/200,gain,60,0.03031,0.02618,0.03486,confirmed
+E3,oracle,PPI CV λ − Supervised,macro_f1,MCAR+MAR @ 50/1000,shrinks,40,0.05661,0.04811,0.06422,confirmed
+E4,noise σ=1,PPI CV λ − Supervised,macro_f1,MCAR+MAR @ 50/100/200,gain,60,0.02123,0.01559,0.02692,confirmed
+E5,noise σ=3,PPI CV λ − Supervised,macro_f1,MCAR+MAR @ 50/100/200/500/1000,no_gain,100,0.00237,0.00028,0.00460,confirmed
+E6,noise σ=3,PPI CV λ − Supervised,macro_f1,MCAR+MAR @ 50/100/200/500/1000,no_harm,100,0.00237,0.00028,0.00460,confirmed
+E7,uninformative,PPI CV λ − Supervised,macro_f1,MCAR+MAR @ 50/100/200/500/1000,no_gain,100,-0.00493,-0.00875,-0.00171,confirmed
+E8,uninformative,PPI CV λ − Supervised,macro_f1,MCAR+MAR @ 50/100/200/500/1000,no_harm,100,-0.00493,-0.00875,-0.00171,NOT confirmed
+E9,uninformative,PPI λ=1 − Supervised,macro_f1,MCAR+MAR @ 50/100/200,harm,60,-0.07155,-0.07810,-0.06414,confirmed
+E10,subgroup-biased,PPI CV λ − SSL soft,macro_f1_g1,MCAR+MAR @ 50/100/200/500/1000,gain,100,0.00546,-0.00049,0.01235,NOT confirmed
+E11,subgroup-biased,PPI CV λ − Supervised,macro_f1,MCAR+MAR @ 50/100/200/500/1000,no_harm,100,0.00098,-0.00254,0.00434,confirmed

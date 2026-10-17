@@ -11,17 +11,19 @@ from joblib import Parallel, delayed, parallel_config
 from config import DEFAULT
 from experiment import fully_labeled_reference, run_case
 from model_utils import DB_PATH, RESULTS_DIR
-from storage import dumps
+from storage import dumps, fingerprint, fingerprint_differences
 from teacher_study import STUDY_DB, variant_name
 
 FINAL_DB = RESULTS_DIR / 'final_test.sqlite'
 # Written to the database before any Test score exists; the run refuses to start if it ever differs.
 FROZEN = {
-    'frozen_on': '2026-10-16',
+    'status': 'draft',  # Set to 'final' only after the main experiment is settled; run() refuses a draft.
+    'frozen_on': None,
     'final_method': 'LR Student with a cross-fitted LR Teacher; labeled-only preprocessing; '
                     'SSL weight and PPI λ chosen by training CV (main-study grids)',
-    'teacher_rule': 'Teacher chosen by mean training-only OOF Macro F1 on visible labels '
-                    '(LR 0.490 > XGBoost 0.487 > CatBoost 0.469); validation not used for the choice',
+    'teacher_rule': 'Teacher chosen by mean training-only OOF Macro F1 pooled over all 75 simulated masks '
+                    '(LR 0.490 > XGBoost 0.487 > CatBoost 0.469). This is a protocol-level choice using every mask, '
+                    'not a rule a single dataset with its own n labels could apply; validation not used',
     'variants': ['LR→LR (final)', 'CatBoost→LR (original design)', 'XGBoost→XGBoost', 'CatBoost→XGBoost (original design)'],
     'references': 'Fully labeled LR and XGBoost',
     'models': 'identical to the validation runs (fits never see the evaluation split); only the scored split changes',
@@ -84,15 +86,22 @@ def connect():
 
 
 def run(workers=8):
+    if FROZEN['status'] != 'final':
+        raise RuntimeError('The Test protocol is still a draft. Settle the main experiment, set FROZEN["status"] to '
+                           '"final" with a date, then run once.')
+    current = json.loads(dumps(fingerprint()))
     db = connect()
     try:
         found = dict(db.execute('SELECT key, value FROM metadata').fetchall())
         if found.get('status') == '"complete"':
             print('Test evaluation already completed once; it is not repeated. Reporting stored results.', flush=True)
             return
+        if 'fingerprint' in found and fingerprint_differences(json.loads(found['fingerprint']), current):
+            raise ValueError('Source/data changed since the Test evaluation started; it cannot be resumed.')
         if 'frozen_protocol' in found and json.loads(found['frozen_protocol']) != FROZEN:
             raise ValueError('The frozen protocol changed after the Test evaluation started.')
         db.execute('INSERT OR REPLACE INTO metadata VALUES(?,?)', ('frozen_protocol', dumps(FROZEN)))
+        db.execute('INSERT OR REPLACE INTO metadata VALUES(?,?)', ('fingerprint', dumps(current)))
         db.commit()
         if 'fully_labeled_test' not in found:
             reference = fully_labeled_reference(evaluation='test')

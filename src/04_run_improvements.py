@@ -1,4 +1,4 @@
-# Step 6: Run or Resume the Pre-Declared Improved Pipeline (improved_v1; Validation Only)
+# Step 4: Run or Resume the Exploratory Improved Pipeline (improved_v2; Validation Only)
 
 import sys
 from pathlib import Path
