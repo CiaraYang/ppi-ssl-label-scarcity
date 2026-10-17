@@ -47,13 +47,17 @@ PPI:        mean_L[a·(CE(Y) − λ·CE(qL))] + λ·mean_U[b·CE(qU)],   λ ∈ 
 | `experiments.sqlite`, `learning_curves.png` | Main study (Macro F1 vs labels; LR top, XGBoost bottom) |
 | `teacher_study.sqlite`, `teacher_quality.png` | Teachers (CatBoost, same-architecture, TabPFN) vs the Supervised Student |
 | `ppi_gains.png` | **Main result**: SSL / PPI gain over Supervised on the same mask (incl. λ fixed at 1 and the TabPFN Teacher) |
-| `ablations.sqlite`, `xgboost_sensitivity.png` | A1–A3 |
+| `ablations.sqlite`, `xgboost_sensitivity.png` | A1–A3. The figure is 2×2: A2/A3 were declared on MCAR and MAR only (100 and 500 labels) |
 | `lr_paired_uncertainty.csv`, `lr_ablation_questions.csv` | LR paired differences with bootstrap intervals (overall and per class); ablations as questions |
 | `improved.sqlite`, `improved_gains.png` | Exploratory improved_v2 |
 | `positive_control.*`, `ppssl_replication.*` | Synthetic checks (database, figure, and verdicts on the pre-declared checks) |
 | `tabpfn_teacher.sqlite`, `tabpfn_teacher_summary.csv` | TabPFN-3.5 Teacher pilot |
 
-All figures are 2×3 grids: columns MCAR / MAR / MNAR, mean ± SD over masks. Colors: Supervised blue, SSL orange, PPI aqua, Teacher gray.
+Figures are 2×3 grids (columns MCAR / MAR / MNAR; lines = mean over masks, no shaded bands; the spread is in the CSV tables), except `xgboost_sensitivity.png`.
+
+Why `xgboost_sensitivity.png` has no MNAR column (reason written down afterwards; the original declaration recorded none):
+- A2/A3 test optimization and capacity, which do not depend on the missingness mechanism.
+- MNAR would add uncorrected selection bias. Each line is solid, with its own color (colorblind-checked palette) and marker; black and gray lines are references.
 
 ## Main result (LR Student, CatBoost Teacher, 75 masks, development set)
 

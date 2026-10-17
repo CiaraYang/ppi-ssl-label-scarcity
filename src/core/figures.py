@@ -61,10 +61,13 @@ MECHANISMS = list(DEFAULT.mechanisms)
 VIOLET = '#6250d6'
 
 
-def six_panel(row_labels):
-    fig, axes = plt.subplots(2, 3, figsize=(14, 7.6), sharex=True, sharey='row', layout='constrained')
+def six_panel(row_labels, mechanisms=None):
+    """2 × 3 grid (MCAR / MAR / MNAR); a study run on fewer mechanisms gets only those columns."""
+    mechanisms = MECHANISMS if mechanisms is None else mechanisms
+    fig, axes = plt.subplots(2, len(mechanisms), figsize=(14*len(mechanisms)/3+(1 if len(mechanisms) < 3 else 0), 7.6),
+                             sharex=True, sharey='row', layout='constrained')
     for row, label in enumerate(row_labels):
-        for column, mechanism in enumerate(MECHANISMS):
+        for column, mechanism in enumerate(mechanisms):
             ax = axes[row, column]
             ax.set_xscale('log')
             ax.set_xticks(BUDGETS, [str(b) for b in BUDGETS])
@@ -81,25 +84,52 @@ def six_panel(row_labels):
 
 
 def band(ax, values, label, color, marker, linestyle='-'):
-    """values: Series indexed by (budget, seed); draws the mean over masks with a ±1 SD band."""
-    grouped = values.groupby(level='budget')
-    mean, sd = grouped.mean().reindex(BUDGETS), grouped.std().reindex(BUDGETS)
+    """values: Series indexed by (budget, seed); draws the mean over masks as a line (no shaded band; the spread is
+    in the CSV tables). The final color is assigned per label by finish()."""
+    mean = values.groupby(level='budget').mean().reindex(BUDGETS)
     keep = mean.notna().to_numpy()
-    x = np.array(BUDGETS)[keep]
-    ax.plot(x, mean[keep], color=color, marker=marker, linestyle=linestyle, linewidth=2, markersize=6, label=label)
-    ax.fill_between(x, (mean-sd)[keep], (mean+sd)[keep], color=color, alpha=.10, linewidth=0)
+    ax.plot(np.array(BUDGETS)[keep], mean[keep], color=color, marker=marker, linestyle=linestyle, linewidth=2,
+            markersize=7, label=label)
 
 
 def zero_line(ax):
     ax.axhline(0, color=INK, linewidth=1.2, label='Supervised (difference = 0)')
 
 
+# Validated categorical order (dataviz reference palette; passes adjacent-pair CVD and normal-vision checks on a light
+# surface). Every line label in a figure gets its own slot, in order of first appearance; all lines are solid, markers
+# stay as a second cue, and black/gray reference lines keep their color.
+PALETTE = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948']
+
+
+def recolor(axes):
+    slots = {}
+    for ax in axes.flat:
+        for line in ax.get_lines():
+            label = line.get_label()
+            if label.startswith('_'):
+                continue
+            if label.startswith('Fully labeled') or str(line.get_color()).lower() == INK:
+                line.set_linestyle('--')  # Reference / threshold lines: dashed, black (a second reference stays gray).
+                continue
+            if line.get_linestyle() not in ('None', ''):
+                line.set_linestyle('-')  # Data lines: all solid; series differ by color and marker.
+            if label not in slots:
+                if len(slots) == len(PALETTE):
+                    raise ValueError('More than eight series in one figure: split it instead of cycling colors.')
+                slots[label] = PALETTE[len(slots)]
+            line.set_color(slots[label])
+
+
 def finish(fig, axes, title, name):
+    recolor(axes)
     handles = {}
     for ax in axes.flat:
         for handle, label in zip(*ax.get_legend_handles_labels()):
             handles.setdefault(label, handle)
     ncol = len(handles) if len(handles) <= 5 else (len(handles)+1)//2
+    if axes.shape[1] < 3:  # Narrower figure (fewer mechanisms): a taller legend instead of a clipped one.
+        ncol = min(ncol, 3)
     fig.legend(handles.values(), handles.keys(), loc='outside lower center', ncol=ncol, frameon=False)
     fig.suptitle(title, fontsize=12)
     save(fig, name)
@@ -130,7 +160,7 @@ def learning_curves(main, reference, audits):
             band(ax, by_case(teacher, mechanism), 'CatBoost Teacher (cross-fit)', TEACHER_GRAY, 'D', ':')
             ax.axhline(reference[student]['macro_f1'], color=INK, linestyle='--', linewidth=1.4,
                        label='Fully labeled Student (same architecture)')
-    finish(fig, axes, 'Validation Macro F1 vs visible labels (mean ± SD over 5 masks; MAR uses IPW; '
+    finish(fig, axes, 'Validation Macro F1 vs visible labels (mean over 5 masks; MAR uses IPW; '
            'MNAR is an uncorrected stress test)', 'learning_curves.png')
 
 
@@ -158,7 +188,7 @@ def teacher_quality(main, audits, study_audits, extra):
                 band(ax, by_case(tabpfn, mechanism, 'alone'), 'TabPFN-3.5 alone (all visible labels as context)',
                      MUTED, 'P', ':')
     finish(fig, axes, 'Teacher quality: each Teacher vs the Student trained Supervised '
-           '(validation Macro F1; mean ± SD over 5 masks)', 'teacher_quality.png')
+           '(validation Macro F1; mean over 5 masks)', 'teacher_quality.png')
 
 
 def complete_tabpfn():
@@ -203,7 +233,7 @@ def ppi_gains(rows, split='validation', name='ppi_gains.png', extra=None):
                 band(ax, t['SSL soft']-t.Supervised, 'SSL soft (TabPFN-3.5 Teacher, pilot)', ORANGE, 'X', ':')
                 band(ax, t['PPI selected']-t.Supervised, 'PPI (TabPFN-3.5 Teacher, pilot)', AQUA, 'X', ':')
     finish(fig, axes, f'Gain over the same Student trained Supervised on the same mask '
-           f'(above 0 = better; {split} Macro F1; mean ± SD over 5 masks)', name)
+           f'(above 0 = better; {split} Macro F1; mean over 5 masks)', name)
 
 
 # Step 6: Figure 4 — XGBoost Sensitivity on the Pre-Declared Subset (A2 Rounds, A3 Capacity)
@@ -214,14 +244,12 @@ def xgboost_sensitivity(main, extra, a2, a3_reference):
                          for (m, b, s), a in a2.items() for r, f in a['fits'].items()])
     large = extra.loc[extra.method == f'{A3_LABEL} / Supervised']
     small = main.loc[(main.method == 'XGBoost / Supervised') & main.budget.isin(A2_GRID['budgets'])]
-    fig, axes = six_panel(['XGBoost PPI λ=1\nMacro F1 − Supervised', 'XGBoost Supervised\nValidation Macro F1'])
-    for column, mechanism in enumerate(MECHANISMS):
+    # A2/A3 test optimization and capacity, which do not depend on the missingness mechanism; they were declared on
+    # MCAR and MAR only (MNAR would add uncorrected selection bias), so the figure is 2 × 2.
+    fig, axes = six_panel(['XGBoost PPI λ=1\nMacro F1 − Supervised', 'XGBoost Supervised\nValidation Macro F1'],
+                          A2_GRID['mechanisms'])
+    for column, mechanism in enumerate(A2_GRID['mechanisms']):
         top, bottom = axes[0, column], axes[1, column]
-        if mechanism not in A2_GRID['mechanisms']:
-            for ax in (top, bottom):
-                ax.text(.5, .5, 'Not run\n(pre-declared subset:\nMCAR and MAR at 100 and 500 labels)',
-                        ha='center', va='center', color=MUTED, transform=ax.transAxes)
-            continue
         zero_line(top)
         for rounds, linestyle, marker in [(100, '-', '^'), (300, '--', 'v')]:
             f = fits.loc[fits.rounds == rounds]
@@ -233,10 +261,10 @@ def xgboost_sensitivity(main, extra, a2, a3_reference):
         band(bottom, by_case(large, mechanism), 'Supervised, 300 rounds, depth 5', BLUE, 'D', ':')
         bottom.axhline(a3_reference['main']['macro_f1'], color=INK, linestyle='--', linewidth=1.4,
                        label='Fully labeled, main')
-        bottom.axhline(a3_reference['large']['macro_f1'], color=INK, linestyle=':', linewidth=1.4,
+        bottom.axhline(a3_reference['large']['macro_f1'], color=MUTED, linewidth=1.4,
                        label='Fully labeled, depth 5')
-    finish(fig, axes, 'XGBoost sensitivity on the pre-declared subset: boosting rounds for PPI (top) and Student capacity '
-           'for Supervised (bottom); mean ± SD over 5 masks', 'xgboost_sensitivity.png')
+    finish(fig, axes, 'XGBoost sensitivity (MCAR and MAR at 100 and 500 labels): boosting rounds for PPI (top)\n'
+           'and Student capacity for Supervised (bottom); mean over 5 masks', 'xgboost_sensitivity.png')
 
 
 # Step 7: Print the Key Numbers (Console Only; Nothing Is Written Besides the Figures)
@@ -341,7 +369,7 @@ def improved_outputs():
                                                      ('PPI heuristic λ', AQUA, 'v', '--')]:
                     band(ax, (wide[f'{student} / {method}{rule}']-sup).loc[mechanism], method, color, marker, style)
         finish(fig, axes, f'Exploratory {PROTOCOL["name"]}: gain over Supervised on the same mask ({label}; Ensemble '
-               f'Teacher; validation; mean ± SD over {len(CONFIG.seeds)} masks)', name)
+               f'Teacher; validation; mean over {len(CONFIG.seeds)} masks)', name)
 
     print(f'\n=== Exploratory {PROTOCOL["name"]} (validation only; {len(CONFIG.seeds)} seeds) ===')
     for student in STUDENTS:
@@ -573,7 +601,7 @@ def positive_control_outputs():
             for method in PC_METHODS:
                 band(ax, paired(rows, teacher, f'{method} − Supervised').loc[mechanism], method, *styles[method])
     finish(fig, axes, 'Synthetic positive control: oracle Teacher (top) and a noisy Teacher weaker than the Student (bottom; noise independent of y)'
-           f'\nLR Student, gain over Supervised on the same mask (mean ± SD over {len(declaration["grid"]["seeds"])} '
+           f'\nLR Student, gain over Supervised on the same mask (mean over {len(declaration["grid"]["seeds"])} '
            'independent replications)', 'positive_control.png')
     table = checks(rows, declaration)
     table.to_csv(RESULTS_DIR/'positive_control_checks.csv', index=False, float_format='%.5f')
