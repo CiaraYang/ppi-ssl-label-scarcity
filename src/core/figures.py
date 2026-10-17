@@ -363,8 +363,9 @@ def improved_outputs():
 # Step 10: LR Main Line — Paired Uncertainty, λ Sources, Per-Class F1 and Ablations as Questions (Tables Only)
 
 KEY = ['mechanism', 'budget', 'seed']
-CAVEAT = ('All 75 masks share one train/validation split and one validation set; seeds vary only the mask (and the '
-          'CV folds). Intervals describe mask-to-mask variability on this development set, not generalization.')
+CAVEAT = ('All 75 masks share one train/validation split and one validation set, and masks with the same seed are nested '
+          'across budgets. SE and intervals therefore resample whole seeds (5 clusters): coarse, descriptive, and about '
+          'mask-to-mask variability on this development set only, not generalization.')
 
 
 def main_lr():
@@ -376,20 +377,23 @@ def main_lr():
 
 # Step 10a: LR Main Line — Paired Differences With SE and a Stratified Paired Bootstrap Over Masks
 
-def stratified_bootstrap(d, draws=4000, seed=0):
-    """Resample masks with replacement within each (mechanism, budget) cell, keeping the design balanced."""
+def seed_cluster_bootstrap(d, draws=4000, seed=0):
+    """Resample whole seeds (clusters) with replacement. Masks with the same seed are nested across budgets and share
+    CV folds, so they are not independent; resampling masks one by one would understate the uncertainty."""
     rng = np.random.default_rng(seed)
-    cells = [g.to_numpy() for _, g in d.groupby(level=['mechanism', 'budget'])]
-    total = sum(len(c) for c in cells)
-    means = np.zeros(draws)
-    for c in cells:
-        means += c[rng.integers(0, len(c), (draws, len(c)))].sum(axis=1)
-    return np.percentile(means/total, [2.5, 97.5])
+    groups = d.groupby(level='seed')
+    sums, counts = groups.sum().to_numpy(), groups.size().to_numpy()
+    picks = rng.integers(0, len(sums), (draws, len(sums)))
+    return np.percentile(sums[picks].sum(axis=1)/counts[picks].sum(axis=1), [2.5, 97.5])
 
 
 def describe(d):
-    lo, hi = stratified_bootstrap(d)
-    return {'n_masks': len(d), 'mean': d.mean(), 'se': d.std(ddof=1)/np.sqrt(len(d)), 'boot_low': lo, 'boot_high': hi,
+    """Mean, seed-cluster SE and seed-cluster bootstrap interval (only 5 seeds: coarse and descriptive)."""
+    lo, hi = seed_cluster_bootstrap(d)
+    seed_means = d.groupby(level='seed').mean()
+    return {'n_masks': len(d), 'n_seeds': len(seed_means), 'mean': d.mean(),
+            'cluster_se': seed_means.std(ddof=1)/np.sqrt(len(seed_means)), 'boot_low': lo, 'boot_high': hi,
+            'seeds_positive': int((seed_means > 1e-12).sum()),
             'better': int((d > 1e-12).sum()), 'worse': int((d < -1e-12).sum()), 'equal': int((d.abs() <= 1e-12).sum())}
 
 
@@ -540,7 +544,7 @@ def lr_mainline_outputs():
     print(CAVEAT)
     table = outputs['lr_paired_uncertainty.csv']
     for _, r in table.loc[(table.scope == 'all 75 masks') & (table['class'] == 'all classes')].iterrows():
-        print(f"  {r.contrast}: {r['mean']:+.4f} ± {r.se:.4f} SE, 95% bootstrap [{r.boot_low:+.4f}, {r.boot_high:+.4f}] "
+        print(f"  {r.contrast}: {r['mean']:+.4f} ± {r.cluster_se:.4f} seed-cluster SE, 95% seed-cluster bootstrap [{r.boot_low:+.4f}, {r.boot_high:+.4f}] "
               f"({r.better} better / {r.worse} worse / {r.equal} equal)")
     print('  Robustness vs improvement: '+'; '.join(f'{k}: {v:.4f}' if isinstance(v, float) else f'{k}: {v}' for k, v in harms.items()))
     print('  λ sources by budget:\n'+counts.to_string())
@@ -557,7 +561,8 @@ def positive_control_outputs():
         return
     rows, declaration = load_pc()
     styles = {'SSL soft': (ORANGE, 's', '-'), 'PPI CV λ': (AQUA, '^', '-'), 'PPI λ=1': (AQUA, 'D', ':')}
-    # Oracle = the objective works; σ=3 = a Teacher worse than the Student but unbiased. The other conditions
+    # Oracle = gains are possible here; σ=3 = a Teacher worse than the Student whose noise is independent of y and x
+    # (softmax of noisy logits is NOT an unbiased probability). The other conditions
     # (σ=1, uninformative, subgroup-biased) are in positive_control_checks.csv and the console summary.
     pair = ['oracle', 'noise σ=3']
     fig, axes = six_panel([f'{t} Teacher\nMacro F1 − Supervised' for t in pair])
@@ -567,7 +572,7 @@ def positive_control_outputs():
             zero_line(ax)
             for method in PC_METHODS:
                 band(ax, paired(rows, teacher, f'{method} − Supervised').loc[mechanism], method, *styles[method])
-    finish(fig, axes, 'Synthetic positive control: oracle Teacher (top) and an unbiased Teacher weaker than the Student (bottom)'
+    finish(fig, axes, 'Synthetic positive control: oracle Teacher (top) and a noisy Teacher weaker than the Student (bottom; noise independent of y)'
            f'\nLR Student, gain over Supervised on the same mask (mean ± SD over {len(declaration["grid"]["seeds"])} '
            'independent replications)', 'positive_control.png')
     table = checks(rows, declaration)

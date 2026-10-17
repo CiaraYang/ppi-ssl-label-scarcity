@@ -565,6 +565,25 @@ class ImprovedTests(unittest.TestCase):
         self.assertEqual(len(rows), 1+len(improved.STUDENTS)*len(improved.METHODS)*2)
         self.assertTrue(all(0 <= r['macro_f1'] <= 1 for r in rows))
 
+    def test_final_ppi_fit_that_is_not_estimable_backs_off_instead_of_crashing(self):
+        config = replace(improved.CONFIG, cv_folds=3, teacher_iterations=5, tree_iterations=5)
+        select, fit = improved.select_and_calibrate, improved.fit_methods
+        def force_lambda(*args, **kwargs):  # Pretend CV chose λ = 0.75 ...
+            chosen, bias, cv = select(*args, **kwargs)
+            return {**chosen, 'PPI CV λ': .75}, bias, cv
+        def not_estimable(XL, y, XU, qL, qU, wl, wu, P_oof, settings, ssl_weights=(.1, .5), lambdas=(.25, .5, .75, 1.)):
+            fits = fit(XL, y, XU, qL, qU, wl, wu, P_oof, settings, ssl_weights, lambdas)
+            if tuple(lambdas) == (.75,):  # ... and that the final full-data fit at 0.75 is not estimable.
+                fits[('PPI CV λ', .75)] = None
+            return fits
+        with patch.object(improved, 'select_and_calibrate', side_effect=force_lambda), \
+             patch.object(improved, 'fit_methods', side_effect=not_estimable):
+            rows, audit = improved.run_improved_case(100, 'MCAR', 42, config)
+        self.assertEqual(len(rows), 1+len(improved.STUDENTS)*len(improved.METHODS)*2)
+        for student in improved.STUDENTS:
+            self.assertEqual(audit['ppi_cv_backoff'][student]['requested'], .75)
+            self.assertLess(audit['ppi_cv_backoff'][student]['effective'], .75)
+
 
 class VersionProtectionTests(unittest.TestCase):
     def test_fingerprint_differences_name_what_changed(self):
@@ -590,6 +609,9 @@ class VersionProtectionTests(unittest.TestCase):
     def test_draft_test_protocol_refuses_to_run(self):
         import final_test
         self.assertEqual(final_test.FROZEN['status'], 'draft')
+        # The draft must match the README proposal: CatBoost → LR is the primary method, with no pooled Teacher rule.
+        self.assertEqual(final_test.VARIANTS[0], ('CatBoost', 'LR'))
+        self.assertIn('Secondary only', final_test.FROZEN['teacher_rule'])
         with patch.object(final_test, 'connect', side_effect=AssertionError('Test database touched')), \
              self.assertRaises(RuntimeError):
             final_test.run()
@@ -680,11 +702,17 @@ class PositiveControlTests(unittest.TestCase):
 
 
 class LRMainlineTests(unittest.TestCase):
-    def test_stratified_bootstrap_and_describe(self):
+    def test_seed_cluster_bootstrap_and_describe(self):
         import figures as lr_mainline
         index = pd.MultiIndex.from_product([['MCAR', 'MAR'], [50, 100], range(5)], names=lr_mainline.KEY)
         constant = pd.Series(.01, index=index)
-        np.testing.assert_allclose(lr_mainline.stratified_bootstrap(constant), [.01, .01])
+        np.testing.assert_allclose(lr_mainline.seed_cluster_bootstrap(constant), [.01, .01])
+        # One seed far from the others must widen the interval: whole seeds are resampled, not single masks.
+        shifted = constant.copy()
+        shifted[shifted.index.get_level_values('seed') == 0] = .05
+        low, high = lr_mainline.seed_cluster_bootstrap(shifted)
+        self.assertAlmostEqual(low, .01)
+        self.assertGreater(high, .02)
         summary = lr_mainline.describe(pd.Series(np.r_[np.ones(10), -np.ones(5), np.zeros(5)], index=index))
         self.assertEqual((summary['better'], summary['worse'], summary['equal']), (10, 5, 5))
 

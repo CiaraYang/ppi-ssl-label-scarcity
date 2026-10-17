@@ -57,29 +57,35 @@ All figures are 2×3 grids: columns MCAR / MAR / MNAR, mean ± SD over masks. Co
 
 ## Main result (LR Student, CatBoost Teacher, 75 masks, development set)
 
-| Contrast | Mean ± SE | 95% paired bootstrap |
-|---|---|---|
-| PPI − Supervised (**improvement**) | +0.0018 ± 0.0011 | [−0.0000, +0.0038] |
-| PPI − SSL soft (**robustness**) | +0.0070 ± 0.0020 | [+0.0043, +0.0101] |
-| SSL soft − Supervised | −0.0052 ± 0.0014 | [−0.0074, −0.0033] |
+| Contrast | Mean | Seeds with a positive mean | Masks better / worse / equal |
+|---|---|---|---|
+| PPI − Supervised (**improvement**) | +0.0018 | 5 / 5 (per-seed +0.0009 … +0.0027) | 33 / 19 / 23 |
+| PPI − SSL soft (**robustness**) | +0.0070 | 5 / 5 | 43 / 15 / 17 |
+| SSL soft − Supervised | −0.0052 | 0 / 5 | 7 / 32 / 36 |
 
-- **PPI avoids SSL's harm but barely beats Supervised.**
-  - SSL is worse than Supervised on 32 masks; on those masks PPI averages +0.0049.
-  - PPI's gain sits mostly in the rarest class, *minor* (+0.022 at ≤200 labels). It is negative under MAR (−0.002).
-- **λ = 0 on 23 masks.** 17 were chosen by CV; 6 were forced because a class had fewer than 2 labels.
-- **The masks share one split,** so the intervals are descriptive.
-- **Ablations** (PPI − Supervised):
-  - LR Teacher: +0.0026. The Teacher's quality also changes, so this is not a clean test of the Teacher's architecture.
-  - λ fixed at 1: +0.0028, with a larger spread; clearly worse under MAR at 500–1,000 labels.
+**How to read the uncertainty.**
+- Masks with the same seed are nested across budgets, so the SE and intervals (`lr_paired_uncertainty.csv`) resample whole seeds.
+- With only 5 seeds, and with all masks sharing one split and one validation set, these numbers describe consistency across masks. They do **not** support a claim of a significant improvement.
+- The averages themselves are valid.
+
+**Findings.**
+- PPI avoids most of SSL's harm. SSL is worse than Supervised on 32 masks, and on those masks PPI averages +0.0049.
+- Its gain over Supervised is small and depends on the setting:
+  - mostly in the rarest class, *minor* (+0.022 at ≤200 labels);
+  - negative under MAR (−0.002).
+- λ = 0 on 23 masks: 17 chosen by CV, and 6 forced because a class had fewer than 2 labels.
+- **Ablations** (PPI − Supervised; `lr_ablation_questions.csv`):
+  - LR Teacher: +0.0026. The Teacher's quality also changes.
+  - λ fixed at 1: +0.0028, with a larger spread; worse under MAR at 500–1,000 labels.
   - Label-free preprocessing: no effect.
   - Teacher chosen per mask by CV: +0.0016.
-- **Both learned Teachers are weaker than the Student they teach**: CatBoost 0.477 and LR 0.499 vs Supervised 0.514.
+- The learned Teachers are weaker than the Student they teach: CatBoost 0.477 and LR 0.499 vs Supervised 0.514.
 
 ## Synthetic checks (pre-declared before running)
 
 - **Positive control.** A known posterior, with difficulty matched to the real data. 9/11 expectations were confirmed.
-  - An oracle Teacher gives PPI +0.045 to +0.070 at 50 labels, and the gain shrinks with more labels. **The implementation and objective work.**
-  - A Teacher that is weak but unbiased (σ = 3; Macro F1 0.42, below the Student) still lets SSL gain a lot, while PPI stays conservative. So what matters is whether the Teacher's errors are *systematic*, not its per-row accuracy. Real-data SSL harm points to systematic errors.
+  - An oracle Teacher gives PPI +0.045 to +0.070 at 50 labels, and the gain shrinks with more labels. This shows the implementation **can produce the expected gain in this synthetic setting**. It is not a proof that the implementation is fully correct.
+  - A noisy Teacher (σ = 3; Macro F1 0.42, below the Student) still lets SSL gain a lot, while PPI stays conservative. Its logit noise is independent of y and x. That does not make its probabilities unbiased: softmax distorts zero-mean noise. So per-row Teacher accuracy alone does not predict whether SSL helps or hurts. Whether the real Teacher's errors are systematic is a hypothesis, not established.
   - Not confirmed:
     - E8: CV λ costs −0.005 with an uninformative Teacher, because CV is noisy with few labels.
     - E10: no clear PPI > SSL inside the subgroup where the Teacher is biased.
@@ -93,7 +99,7 @@ All figures are 2×3 grids: columns MCAR / MAR / MNAR, mean ± SD over masks. Co
 **Question.** Is the small PPI gain caused by a Teacher that learns from the same few labels?
 
 **Setup.**
-- The Teacher is TabPFN-3.5: pretrained only on synthetic data, research license, run on an Apple GPU.
+- The Teacher is TabPFN-3.5, with the checkpoint pinned to `tabpfn-v3.5-20260909.safetensors` and `tabpfn==9.2.0`. It was pretrained only on synthetic data, uses a research license, and runs on an Apple GPU.
 - It uses the visible labels as its in-context examples, and is cross-fitted and nested in CV exactly like CatBoost.
 - Everything else matches the main study. The Supervised fits reproduce the main study exactly.
 
@@ -108,7 +114,7 @@ All figures are 2×3 grids: columns MCAR / MAR / MNAR, mean ± SD over masks. Co
 
 **Reading.**
 - TabPFN is a much better Teacher, but **the LR Student does not inherit it**: PPI gains no more than with CatBoost, and SSL still hurts (slightly less).
-- At 500 labels, TabPFN alone beats every LR Student. The bottleneck is the linear Student, not only the Teacher.
+- At 500 labels, TabPFN alone beats every LR Student. **Why the Student does not inherit the Teacher's advantage is not isolated.** Candidates are LR capacity, regularization (C = 1), the 0.8 confidence filter and noisy λ selection.
 - With 5 masks per budget, this is descriptive.
 - One smoke case (MCAR/100/42) was viewed before the run; it reproduced exactly.
 
@@ -123,14 +129,18 @@ Changes made together:
 
 **Results:** LR PPI (heuristic λ) − Supervised = +0.0049 at argmax, but the advantage disappears under the threshold rule, which itself lifts Supervised by +0.0085.
 
-**Status:** descriptive only. Earlier versions v1 and v1.1 were aborted (not strictly out-of-fold), and their interim MCAR 50–100 numbers had been viewed.
+**Status:** descriptive only.
+- Because so much changed at once, only methods *within* improved_v2 can be compared. No single change can be credited with a gain.
+- For the leaf-refit Student, the heuristic λ uses out-of-fold probabilities, but its gradient features come from trees fitted on all visible labels. It is therefore not strictly out-of-fold, and not PPI++.
+- Earlier versions v1 and v1.1 were aborted (not strictly out-of-fold), and their interim MCAR 50–100 numbers had been viewed.
+- A missing back-off for a non-estimable final PPI fit was added later; none of the 225 stored cases needed it.
 
 ## Proposed Test protocol (not executed)
 
 1. **Primary:** the proposal's design (CatBoost Teacher → LR, CV λ). It needs no Teacher selection, so each mask can run it within its own label budget.
-2. **Claims:** "improvement" only if the bootstrap interval of PPI − Supervised excludes 0; "robustness" only if PPI − SSL excludes 0. Both are reported regardless.
+2. **Claims:** "improvement" only if the seed-cluster interval of PPI − Supervised stays above 0; "robustness" only if PPI − SSL stays above 0. Both are reported regardless, and are descriptive (5 seeds, one split).
 3. **Secondary:** a per-mask Teacher choice (CatBoost vs LR) by that mask's own training CV. XGBoost is a sensitivity analysis only. improved_v2, the synthetic studies and TabPFN are not run on Test.
-4. **Freezing:** write these rules into `FROZEN` in `src/core/final_test.py` (`status = 'final'`, with the date), then run `07_final_test.py` once.
+4. **Freezing:** these rules are already in the draft `FROZEN`/`VARIANTS` in `src/core/final_test.py` (CatBoost→LR, LR→LR, CatBoost→XGBoost), which stays `draft` and refuses to run. To freeze, set `status = 'final'` with the date, then run `07_final_test.py` once.
 
 ## Reproducibility
 
@@ -140,3 +150,9 @@ Changes made together:
 - Stored results were checked to reproduce **bit-for-bit** with the current code (selected full replays plus the A1 replay of all Teachers).
 - `archive/source_before_cleanup.zip` holds the source that produced `experiments.sqlite`.
 - `eda.ipynb` draws the proposal figures in `proposal/`.
+
+## What the evidence supports
+
+- On LR, PPI gives a **small, setting-dependent gain**. It is often **more stable than plain SSL**, but it does **not consistently beat Supervised**.
+- TabPFN raised the Teacher's scores in part, but did not consistently improve the PPI Student.
+- **Reference, not ceiling:** fully labeled scores (LR 0.637) are references for the current model settings, not upper limits.

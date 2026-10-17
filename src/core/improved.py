@@ -231,6 +231,19 @@ def run_improved_case(n_labeled, mechanism, seed, config=CONFIG):
             final = {'Supervised': fits[('Supervised', 0.)],
                      'SSL soft': fits[('SSL soft', chosen['SSL soft'])] if ssl else fits[('Supervised', 0.)],
                      'PPI CV λ': fits[('PPI CV λ', chosen['PPI CV λ'])] if lam else fits[('Supervised', 0.)]}
+            if final['PPI CV λ'] is None:  # CV choice not estimable on all visible labels: back off as the main study does.
+                for smaller in sorted((v for v in (.25, .5, .75, 1.) if v < chosen['PPI CV λ']), reverse=True):
+                    try:
+                        final['PPI CV λ'] = fit_student(XL, data.y, XU, qL, qU, 'ppi', smaller, wl=data.labeled_weights,
+                                                        wu=data.unlabeled_weights, initial=final['Supervised'],
+                                                        config=student_settings(student, config))[0]
+                        audit.setdefault('ppi_cv_backoff', {})[student] = {'requested': chosen['PPI CV λ'], 'effective': smaller}
+                        break
+                    except NonEstimableCandidate:
+                        continue
+                else:
+                    final['PPI CV λ'] = final['Supervised']
+                    audit.setdefault('ppi_cv_backoff', {})[student] = {'requested': chosen['PPI CV λ'], 'effective': 0.}
             heuristic = [(value, w) for (m, value), w in fits.items() if m == 'PPI heuristic λ'][0]
             final['PPI heuristic λ'] = heuristic[1]
             base = probabilities(XV, final['Supervised'])

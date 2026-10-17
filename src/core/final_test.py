@@ -17,18 +17,25 @@ from teacher_study import STUDY_DB, variant_name
 FINAL_DB = RESULTS_DIR / 'final_test.sqlite'
 # Written to the database before any Test score exists; the run refuses to start if it ever differs.
 FROZEN = {
-    'status': 'draft',  # Set to 'final' only after the main experiment is settled; run() refuses a draft.
+    'status': 'draft',  # Set to 'final' (with a date) only when the author freezes the protocol; run() refuses a draft.
     'frozen_on': None,
-    'final_method': 'LR Student with a cross-fitted LR Teacher; labeled-only preprocessing; '
-                    'SSL weight and PPI λ chosen by training CV (main-study grids)',
-    'teacher_rule': 'Teacher chosen by mean training-only OOF Macro F1 pooled over all 75 simulated masks '
-                    '(LR 0.490 > XGBoost 0.487 > CatBoost 0.469). This is a protocol-level choice using every mask, '
-                    'not a rule a single dataset with its own n labels could apply; validation not used',
-    'variants': ['LR→LR (final)', 'CatBoost→LR (original design)', 'XGBoost→XGBoost', 'CatBoost→XGBoost (original design)'],
+    'final_method': 'Primary (the proposal design): LR Student with a cross-fitted CatBoost Teacher; labeled-only '
+                    'preprocessing; SSL weight and PPI λ chosen by training CV on the visible labels (main-study grids); '
+                    'argmax decisions. No Teacher selection, so every mask runs it within its own label budget',
+    'primary_claims': 'Pooled over 75 masks, mean with a seed-cluster interval (5 seeds; descriptive): "improvement" only if '
+                      'PPI − Supervised stays above 0, "robustness" only if PPI − SSL soft stays above 0; both reported '
+                      'whatever the outcome',
+    'teacher_rule': 'Secondary only: per mask, keep the CatBoost or LR Teacher whose selected PPI setting has the higher '
+                    'training-CV Macro F1 on that mask\'s visible labels (teacher_study.selected_cv_score; ties and the '
+                    'no-CV small-class fallback keep CatBoost). Replaces the earlier draft rule that pooled OOF scores '
+                    'over all 75 masks, which no single dataset could apply',
+    'variants': ['CatBoost→LR (primary)', 'LR→LR (for the secondary Teacher rule)', 'CatBoost→XGBoost (sensitivity)'],
+    'not_on_test': 'improved_v2, the threshold rule, the synthetic checks and the TabPFN pilot',
     'references': 'Fully labeled LR and XGBoost',
+    'disclosure': 'validation was used as a development set; the protocol was revised after viewing it',
     'models': 'identical to the validation runs (fits never see the evaluation split); only the scored split changes',
 }
-VARIANTS = [('LR', 'LR'), ('CatBoost', 'LR'), ('XGBoost', 'XGBoost'), ('CatBoost', 'XGBoost')]
+VARIANTS = [('CatBoost', 'LR'), ('LR', 'LR'), ('CatBoost', 'XGBoost')]
 
 
 def variant_config(teacher, student):

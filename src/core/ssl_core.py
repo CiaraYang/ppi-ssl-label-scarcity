@@ -144,6 +144,9 @@ def teacher_probabilities(model, table, classes):
     return probability
 
 
+TABPFN_CHECKPOINT = 'tabpfn-v3.5-20260909.safetensors'  # TabPFN-3.5, pretrained on synthetic tasks only
+
+
 def tabpfn_teacher(X, y, seed=42):
     """Pretrained TabPFN-3.5 (synthetic-only pretraining) with this fold's visible labels as its context.
     Categories are coded from the fold's own rows; TabPFN takes no sample weights, so it is unweighted (MCAR only)."""
@@ -154,6 +157,8 @@ def tabpfn_teacher(X, y, seed=42):
     import torch
     from sklearn.preprocessing import OrdinalEncoder
     from tabpfn import TabPFNClassifier
+    from tabpfn.constants import ModelVersion
+    from tabpfn.model_loading import prepend_cache_path
     from model_utils import NUMERIC_FEATURES
     coder = OrdinalEncoder(handle_unknown='use_encoded_value', unknown_value=np.nan, encoded_missing_value=np.nan)
     coder.fit(X[CATEGORICAL_FEATURES].astype(object).fillna('Unknown'))
@@ -163,8 +168,11 @@ def tabpfn_teacher(X, y, seed=42):
     classes = np.unique(y)
     if len(classes) == 1:
         return lambda table: teacher_probabilities(None, table, classes)
-    model = TabPFNClassifier(device='mps' if torch.backends.mps.is_available() else 'cpu', random_state=seed,
-                             categorical_features_indices=list(range(len(NUMERIC_FEATURES), X.shape[1])))
+    # Pinned checkpoint, not the package default, so a tabpfn upgrade cannot silently swap the model.
+    model = TabPFNClassifier.create_default_for_version(
+        ModelVersion.V3_5, model_path=prepend_cache_path(TABPFN_CHECKPOINT), random_state=seed,
+        device='mps' if torch.backends.mps.is_available() else 'cpu',
+        categorical_features_indices=list(range(len(NUMERIC_FEATURES), X.shape[1])))
     model.fit(encode(X), y)
     def predict(table):
         probability = np.zeros((len(table), K))
