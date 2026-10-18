@@ -1,4 +1,8 @@
-# Step 1: Replay the Main Study's Teachers Exactly and Add Pre-Specified Ablations
+# Step 2: Ablations — A1 Teacher Replay / Teacher-Only / Fixed λ=1, A2 XGBoost Rounds, A3 XGBoost Capacity
+
+import sys
+from importlib import import_module
+from pathlib import Path
 
 import argparse
 import hashlib
@@ -12,22 +16,26 @@ import numpy as np
 from joblib import Parallel, delayed, parallel_config
 from threadpoolctl import threadpool_limits
 
-from config import DEFAULT
-from experiment import fully_labeled_reference, metric_row
-from masking import generate_mask
-from model_utils import DB_PATH, RESULTS_DIR, load_case, prepare_catboost_features
-from ssl_core import (K, NonEstimableCandidate, crossfit_teacher, fit_student, fit_teacher,
-                      prepare_design, probabilities, score, teacher_probabilities)
-from storage import (connect, dumps, fingerprint, fingerprint_differences, initialize, read_results, save_case,
-                     set_metadata, stored_fingerprint_warning)
+common = import_module('00_common')
+DEFAULT, generate_mask, DB_PATH, RESULTS_DIR, load_case, prepare_catboost_features = common.DEFAULT, common.generate_mask, common.DB_PATH, common.RESULTS_DIR, common.load_case, common.prepare_catboost_features
+connect, dumps, fingerprint, fingerprint_differences, initialize, read_results = common.connect, common.dumps, common.fingerprint, common.fingerprint_differences, common.initialize, common.read_results
+save_case, set_metadata, stored_fingerprint_warning = common.save_case, common.set_metadata, common.stored_fingerprint_warning
+methods = import_module('00_methods')
+fully_labeled_reference, metric_row, K, NonEstimableCandidate, crossfit_teacher, fit_student = methods.fully_labeled_reference, methods.metric_row, methods.K, methods.NonEstimableCandidate, methods.crossfit_teacher, methods.fit_student
+fit_teacher, prepare_design, probabilities, score, teacher_probabilities = methods.fit_teacher, methods.prepare_design, methods.probabilities, methods.score, methods.teacher_probabilities
 
-ABLATION_DB = RESULTS_DIR / 'ablations.sqlite'
+
+# ===== From ablations.py — Step 1: Replay the Main Study's Teachers Exactly and Add Pre-Specified Ablations =====
+
+ABLATION_DB = RESULTS_DIR / 'databases' / 'ablations.sqlite'
 PROTOCOL = 'ablation_v1'
 CHECKED = ['accuracy', 'macro_f1', 'balanced_accuracy', 'log_loss']
 
 
 class ReplayMismatch(RuntimeError):
     pass
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # The numbered files import each other by name.
 
 
 def read_main_study():

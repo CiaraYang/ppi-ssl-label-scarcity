@@ -7,21 +7,21 @@ CS 680 project. Does unlabeled data help four-class `Aircraft_Damage_Type` class
 Python 3.13: `python3.13 -m venv .venv && .venv/bin/python -m pip install -r requirements.txt`, then:
 
 ```bash
-.venv/bin/python src/01_run_main_study.py         # split (if missing) + main study: 75 cases × LR and XGBoost Students
-.venv/bin/python src/02_run_ablations.py          # A1 fixed λ=1 / Teacher replay, A2 XGBoost rounds, A3 XGBoost capacity
-.venv/bin/python src/03_run_teacher_study.py      # same-architecture Teachers, label-free preprocessing, TabPFN-3.5 Teacher pilot
-.venv/bin/python src/04_run_improvements.py       # exploratory improved_v2 pipeline
-.venv/bin/python src/05_run_synthetic_checks.py   # synthetic positive control + PP-SSL replication
-.venv/bin/python src/06_make_figures.py           # all figures and tables (reads the databases only)
-.venv/bin/python src/07_final_test.py             # one-shot Test evaluation, run last; locked as a draft
+.venv/bin/python src/01_main_study.py         # split (if missing) + main study: 75 cases × LR and XGBoost Students
+.venv/bin/python src/02_ablations.py          # A1 fixed λ=1 / Teacher replay, A2 XGBoost rounds, A3 XGBoost capacity
+.venv/bin/python src/03_teacher_study.py      # same-architecture Teachers, label-free preprocessing, TabPFN-3.5 Teachers
+.venv/bin/python src/04_improved.py           # exploratory improved_v2 pipeline
+.venv/bin/python src/05_synthetic_checks.py   # synthetic positive control + PP-SSL replication
+.venv/bin/python src/06_figures.py            # all figures and tables (reads the databases only)
+.venv/bin/python src/07_final_test.py         # one-shot Test evaluation, run last; locked as a draft
 .venv/bin/python -m unittest discover -s tests
 ```
 
-Each study resumes from its own database and is skipped if already complete. Later studies open earlier databases read-only. The TabPFN pilot needs `tabpfn` and a one-time license login; it takes about 1 hour on an Apple GPU.
+`src/` holds only numbered files: `00_common.py` and `00_methods.py` are shared code; 01–07 are the steps in run order. Each study writes its own database to `results/databases/` and is skipped if already complete. Later studies open earlier databases read-only. The TabPFN pilot needs `tabpfn` and a one-time license login; it takes about 1 hour on an Apple GPU.
 
 ## Protocol
 
-- **Data.** 7 features, with a fixed split: 22,586 train / 4,840 validation / 4,841 test (`results/split_manifest.csv`).
+- **Data.** 7 features, with a fixed split: 22,586 train / 4,840 validation / 4,841 test (`data/split_manifest.csv`).
 - **Masks** (training set only; exact label counts; seeds 42–46):
   - MCAR is uniform.
   - MAR under-samples records from 2023 on, with known probabilities, and uses IPW.
@@ -42,7 +42,7 @@ PPI:        mean_L[a·(CE(Y) − λ·CE(qL))] + λ·mean_U[b·CE(qU)],   λ ∈ 
 
 ## Outputs (`results/`)
 
-| File | Content |
+| File (databases in `results/databases/`) | Content |
 |---|---|
 | `experiments.sqlite`, `learning_curves.png` | Main study (Macro F1 vs labels; LR top, XGBoost bottom) |
 | `teacher_study.sqlite`, `teacher_quality.png` | Teachers (CatBoost, same-architecture, TabPFN) vs the Supervised Student |
@@ -51,7 +51,7 @@ PPI:        mean_L[a·(CE(Y) − λ·CE(qL))] + λ·mean_U[b·CE(qU)],   λ ∈ 
 | `lr_paired_uncertainty.csv`, `lr_ablation_questions.csv` | LR paired differences with bootstrap intervals (overall and per class); ablations as questions |
 | `improved.sqlite`, `improved_gains.png` | Exploratory improved_v2 |
 | `positive_control.*`, `ppssl_replication.*` | Synthetic checks (database, figure, and verdicts on the pre-declared checks) |
-| `tabpfn_teacher.sqlite`, `tabpfn_teacher_summary.csv` | TabPFN-3.5 Teacher pilot |
+| `tabpfn_teacher_full.sqlite`, `tabpfn_teacher_summary.csv` | TabPFN-3.5 Teacher on all 75 masks, LR and XGBoost Students (`tabpfn_teacher.sqlite` = the earlier MCAR pilot) |
 
 Figures are 2×3 grids (columns MCAR / MAR / MNAR; lines = mean over masks, no shaded bands; the spread is in the CSV tables), except `xgboost_sensitivity.png`.
 
@@ -98,29 +98,31 @@ Why `xgboost_sensitivity.png` has no MNAR column (reason written down afterwards
   - This project's offline CV λ tracks the best fixed λ better.
   - **Boundary:** this project adapts, rather than replicates, PP-SSL. It uses classification, offline CV λ chosen for Macro F1, a learned cross-fitted Teacher, IPW, and MNAR.
 
-## TabPFN-3.5 Teacher pilot (exploratory; MCAR; 5 masks per budget)
+## TabPFN-3.5 Teacher (exploratory; all 75 masks; LR and XGBoost Students)
 
-**Question.** Is the small PPI gain caused by a Teacher that learns from the same few labels?
+**Question.** Does a stronger, pretrained Teacher help the Student?
 
 **Setup.**
-- The Teacher is TabPFN-3.5, with the checkpoint pinned to `tabpfn-v3.5-20260909.safetensors` and `tabpfn==9.2.0`. It was pretrained only on synthetic data, uses a research license, and runs on an Apple GPU.
-- It uses the visible labels as its in-context examples, and is cross-fitted and nested in CV exactly like CatBoost.
-- Everything else matches the main study. The Supervised fits reproduce the main study exactly.
+- TabPFN-3.5 (pinned checkpoint; synthetic-only pretraining) uses the visible labels as its context. It is cross-fitted and nested in CV like CatBoost.
+- Under MAR it is unweighted, because TabPFN takes no sample weights.
+- Expectations were declared before the run.
+- Supervised fits matched the main study exactly, and the 10 pilot masks reproduced exactly.
 
-| Validation Macro F1 | 100 labels | 500 labels |
+| Mean over 75 masks (seed-cluster interval) | LR Student | XGBoost Student |
 |---|---|---|
-| Supervised LR | 0.494 | 0.585 |
-| CatBoost Teacher (cross-fit) | 0.442 | 0.536 |
-| TabPFN Teacher (cross-fit) | 0.465 | 0.591 |
-| **TabPFN alone** (all visible labels) | 0.482 | **0.603** |
-| PPI − Supervised: TabPFN / CatBoost Teacher | +0.009 / +0.009 | +0.000 / +0.002 |
-| SSL − Supervised: TabPFN / CatBoost Teacher | −0.019 / −0.027 | −0.001 / −0.001 |
+| TabPFN Teacher − CatBoost Teacher (Macro F1) | +0.023 [+0.020, +0.027] | same Teacher |
+| PPI − Supervised, TabPFN Teacher | **+0.005** [+0.003, +0.006] | −0.000 [−0.002, +0.001] |
+| PPI − Supervised, CatBoost Teacher | +0.002 [+0.001, +0.002] | −0.002 [−0.003, −0.002] |
+| SSL − Supervised, TabPFN Teacher | −0.004 [−0.008, −0.002] | −0.005 [−0.010, −0.001] |
+| TabPFN alone − Supervised | +0.004 [−0.001, +0.009] | +0.010 [+0.003, +0.017] |
 
-**Reading.**
-- TabPFN is a much better Teacher, but **the LR Student does not inherit it**: PPI gains no more than with CatBoost, and SSL still hurts (slightly less).
-- At 500 labels, TabPFN alone beats every LR Student. **Why the Student does not inherit the Teacher's advantage is not isolated.** Candidates are LR capacity, regularization (C = 1), the 0.8 confidence filter and noisy λ selection.
-- With 5 masks per budget, this is descriptive.
-- One smoke case (MCAR/100/42) was viewed before the run; it reproduced exactly.
+**Reading** (declared expectations E1–E4 all hold):
+- **E1:** TabPFN is the better Teacher on every seed.
+- **E2:** for LR, PPI gains slightly more with TabPFN, +0.003 over CatBoost; this stays under the declared 0.005 margin. Under MAR, PPI's change versus Supervised turns from negative to positive (−0.002 → +0.003).
+- **E3:** XGBoost still gets no reliable PPI gain.
+- **E4:** under MCAR, TabPFN alone beats Supervised LR at 500 and 1,000 labels on every mask.
+- SSL still hurts with the better Teacher.
+- **Bottom line:** a better Teacher helps PPI a little, but the gain stays small, and TabPFN by itself is often as good as or better than the Students.
 
 ## Exploratory improved_v2 (`improved.sqlite`, 225 cases)
 
@@ -144,7 +146,7 @@ Changes made together:
 1. **Primary:** the proposal's design (CatBoost Teacher → LR, CV λ). It needs no Teacher selection, so each mask can run it within its own label budget.
 2. **Claims:** "improvement" only if the seed-cluster interval of PPI − Supervised stays above 0; "robustness" only if PPI − SSL stays above 0. Both are reported regardless, and are descriptive (5 seeds, one split).
 3. **Secondary:** a per-mask Teacher choice (CatBoost vs LR) by that mask's own training CV. XGBoost is a sensitivity analysis only. improved_v2, the synthetic studies and TabPFN are not run on Test.
-4. **Freezing:** these rules are already in the draft `FROZEN`/`VARIANTS` in `src/core/final_test.py` (CatBoost→LR, LR→LR, CatBoost→XGBoost), which stays `draft` and refuses to run. To freeze, set `status = 'final'` with the date, then run `07_final_test.py` once.
+4. **Freezing:** these rules are already in the draft `FROZEN`/`VARIANTS` in `src/07_final_test.py` (CatBoost→LR, LR→LR, CatBoost→XGBoost), which stays `draft` and refuses to run. To freeze, set `status = 'final'` with the date, then run `07_final_test.py` once.
 
 ## Reproducibility
 
@@ -158,5 +160,5 @@ Changes made together:
 ## What the evidence supports
 
 - On LR, PPI gives a **small, setting-dependent gain**. It is often **more stable than plain SSL**, but it does **not consistently beat Supervised**.
-- TabPFN raised the Teacher's scores in part, but did not consistently improve the PPI Student.
+- A stronger pretrained Teacher (TabPFN) helps the LR PPI Student only slightly (+0.003 over CatBoost) and does not help XGBoost; TabPFN alone is often as good or better.
 - **Reference, not ceiling:** fully labeled scores (LR 0.637) are references for the current model settings, not upper limits.

@@ -1,20 +1,31 @@
-# Step 1: Read Every Study Read-Only; Figures and Analysis Tables Are the Only Written Outputs
+# Step 6: All Figures and Tables From the Saved Databases (Reads Only)
 
 import json
 import sqlite3
+import sys
+from importlib import import_module
 from itertools import product
+from pathlib import Path
 
 import matplotlib
 matplotlib.use('Agg')
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # noqa: E402  (after choosing the non-interactive backend)
 import numpy as np
 import pandas as pd
 
-from ablations import A2_GRID, A3_LABEL, ABLATION_DB
-from config import DEFAULT
-from experiment import METHODS
-from model_utils import CLASSES, DB_PATH, RESULTS_DIR
-from teacher_study import TABPFN_GRID, cv_selected_teacher, load as load_teacher_study, load_tabpfn
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # The numbered files import each other by name.
+common = import_module('00_common')
+CLASSES, DB_PATH, DEFAULT, RESULTS_DIR = common.CLASSES, common.DB_PATH, common.DEFAULT, common.RESULTS_DIR
+methods = import_module('00_methods')
+METHODS = methods.METHODS
+_ablations = import_module('02_ablations')
+A2_GRID, A3_LABEL, ABLATION_DB = _ablations.A2_GRID, _ablations.A3_LABEL, _ablations.ABLATION_DB
+_teacher_study = import_module('03_teacher_study')
+TABPFN_GRID, cv_selected_teacher = _teacher_study.TABPFN_GRID, _teacher_study.cv_selected_teacher
+load_teacher_study, load_tabpfn = _teacher_study.load, _teacher_study.load_tabpfn
+
+
+# ===== Read Every Study Read-Only; Figures and Analysis Tables Are the Only Written Outputs =====
 
 # Reference categorical slots 1–3 (blue, orange, aqua) validate all-pairs for color-vision deficiency.
 BLUE, ORANGE, AQUA = '#2a78d6', '#eb6834', '#1baf7a'
@@ -170,7 +181,7 @@ def teacher_quality(main, audits, study_audits, extra):
     catboost = pd.DataFrame([dict(mechanism=m, budget=b, seed=s, macro_f1=a['teacher_validation']['macro_f1'])
                              for (m, b, s), a in audits.items()])
     refit = extra.loc[extra.method == 'Teacher / Refit on visible labels']
-    tabpfn = tabpfn_teacher_scores()  # Exploratory pilot (MCAR, 100 and 500 labels); empty until it has run.
+    tabpfn = tabpfn_teacher_scores()  # Full TabPFN study if complete, else the MCAR pilot; empty if neither.
     fig, axes = six_panel([f'{s} Student\nValidation Macro F1' for s in DEFAULT.student_models])
     for row, student in enumerate(DEFAULT.student_models):
         same = pd.DataFrame([dict(mechanism=m, budget=b, seed=s, macro_f1=a['teacher_validation']['macro_f1'])
@@ -182,8 +193,7 @@ def teacher_quality(main, audits, study_audits, extra):
             band(ax, by_case(catboost, mechanism), 'CatBoost Teacher (cross-fit, used for pseudo-labels)', TEACHER_GRAY, 'D', ':')
             band(ax, by_case(refit, mechanism), 'CatBoost Teacher refit on all visible labels', TEACHER_GRAY, 'D', '--')
             band(ax, by_case(same, mechanism), 'Same-architecture Teacher (cross-fit)', VIOLET, 'v', '-.')
-            if student == 'LR' and mechanism in TABPFN_GRID['mechanisms'] and not tabpfn.empty:
-                # Darker gray = the pretrained Teacher (pilot: MCAR, 100 and 500 labels only).
+            if not tabpfn.empty and mechanism in set(tabpfn.mechanism):
                 band(ax, by_case(tabpfn, mechanism), 'TabPFN-3.5 Teacher (pretrained; cross-fit)', MUTED, 'X', '-')
                 band(ax, by_case(tabpfn, mechanism, 'alone'), 'TabPFN-3.5 alone (all visible labels as context)',
                      MUTED, 'P', ':')
@@ -191,15 +201,31 @@ def teacher_quality(main, audits, study_audits, extra):
            '(validation Macro F1; mean over 5 masks)', 'teacher_quality.png')
 
 
-def complete_tabpfn():
-    """The TabPFN pilot's rows and audits, but only once every declared case is complete (never partial results)."""
+def tabpfn_results():
+    """TabPFN-Teacher rows (student, mechanism, budget, seed, method, macro_f1, lambda_value) and audits.
+    Uses the full study (75 masks, LR and XGBoost) once complete, else the complete MCAR/LR pilot, else nothing."""
+    full_db = _teacher_study.TABPFN_FULL_DB
+    if full_db.exists():
+        db = read_only(full_db)
+        try:
+            done = db.execute("SELECT COUNT(*) FROM cases WHERE status='complete'").fetchone()[0]
+            if done == len(DEFAULT.mechanisms)*len(DEFAULT.budgets)*len(DEFAULT.seeds):
+                rows = pd.read_sql_query('SELECT mechanism,budget,seed,method,macro_f1,lambda_value FROM metrics', db)
+                audits = {(m, b, s): json.loads(a) for m, b, s, a in
+                          db.execute("SELECT mechanism,budget,seed,audit FROM cases WHERE status='complete'")}
+                rows[['student', 'method']] = rows.method.str.split(' / ', expand=True)
+                return rows, audits, 'full'
+        finally:
+            db.close()
     rows, audits = load_tabpfn()
     keys = set(product(TABPFN_GRID['mechanisms'], TABPFN_GRID['budgets'], TABPFN_GRID['seeds']))
-    return (rows, audits) if keys <= set(audits) else (pd.DataFrame(), {})
+    if rows.empty or not keys <= set(audits):
+        return pd.DataFrame(), {}, None
+    return rows.assign(student='LR')[['student', 'mechanism', 'budget', 'seed', 'method', 'macro_f1', 'lambda_value']], audits, 'pilot'
 
 
 def tabpfn_teacher_scores():
-    _, audits = complete_tabpfn()
+    _, audits, _ = tabpfn_results()
     return pd.DataFrame([dict(mechanism=m, budget=b, seed=s, macro_f1=a['teacher_validation']['macro_f1'],
                               alone=a['tabpfn_refit_validation']['macro_f1']) for (m, b, s), a in audits.items()])
 
@@ -212,9 +238,10 @@ def ppi_gains(rows, split='validation', name='ppi_gains.png', extra=None):
     fixed = None if extra is None else extra.loc[extra.method.str.endswith('/ PPI fixed λ=1') & ~extra.method.str.contains(r'\[')]
     if fixed is not None:
         fixed = fixed.assign(student=fixed.method.str.split(' / ').str[0]).set_index(['student', 'mechanism', 'budget', 'seed']).macro_f1
-    pilot, _ = complete_tabpfn()
-    tabpfn = pd.DataFrame() if pilot.empty else pilot.pivot_table(index=['mechanism', 'budget', 'seed'], columns='method',
-                                                                  values='macro_f1')
+    found, _, scope = tabpfn_results()
+    tabpfn = pd.DataFrame() if found.empty else found.pivot_table(index=['student', 'mechanism', 'budget', 'seed'],
+                                                                  columns='method', values='macro_f1')
+    tag = '' if scope == 'full' else ', pilot'
     fig, axes = six_panel([f'{s} Student\nMacro F1 − Supervised' for s in DEFAULT.student_models])
     for row, student in enumerate(DEFAULT.student_models):
         catboost, same = wide.loc[('CatBoost', student)], wide.loc[(student, student)]
@@ -228,10 +255,10 @@ def ppi_gains(rows, split='validation', name='ppi_gains.png', extra=None):
             if fixed is not None:  # A1: CatBoost Teacher with λ fixed at 1 instead of chosen by training CV.
                 f = fixed.loc[(student, mechanism)]
                 band(ax, f-c.Supervised, 'PPI, λ fixed at 1 (CatBoost Teacher, A1)', AQUA, 'D', '-.')
-            if split == 'validation' and student == 'LR' and mechanism in TABPFN_GRID['mechanisms'] and not tabpfn.empty:
-                t = tabpfn.loc[mechanism]
-                band(ax, t['SSL soft']-t.Supervised, 'SSL soft (TabPFN-3.5 Teacher, pilot)', ORANGE, 'X', ':')
-                band(ax, t['PPI selected']-t.Supervised, 'PPI (TabPFN-3.5 Teacher, pilot)', AQUA, 'X', ':')
+            if split == 'validation' and not tabpfn.empty and (student, mechanism) in tabpfn.index.droplevel([2, 3]):
+                t = tabpfn.loc[(student, mechanism)]
+                band(ax, t['SSL soft']-t.Supervised, f'SSL soft (TabPFN-3.5 Teacher{tag})', ORANGE, 'X', ':')
+                band(ax, t['PPI selected']-t.Supervised, f'PPI (TabPFN-3.5 Teacher{tag})', AQUA, 'X', ':')
     finish(fig, axes, f'Gain over the same Student trained Supervised on the same mask '
            f'(above 0 = better; {split} Macro F1; mean over 5 masks)', name)
 
@@ -317,7 +344,8 @@ def main():
 # Step 8: Final Test Evaluation (Written Only After 07_final_test.py Has Run Once)
 
 def final_test_outputs():
-    from final_test import FROZEN, load as load_test
+    _module = import_module('07_final_test')
+    FROZEN, load_test = _module.FROZEN, _module.load
     test, reference = load_test()
     ppi_gains(test, 'TEST', 'test_gains.png')
     validation, _ = load_teacher_study()
@@ -338,7 +366,8 @@ def final_test_outputs():
 # Step 9: Exploratory Improved Pipeline — Same Six-Panel Template, Validation Only, Complete Runs Only
 
 def improved_outputs():
-    from improved import CONFIG, IMPROVED_DB, PROTOCOL, STUDENTS, is_complete
+    _module = import_module('04_improved')
+    CONFIG, IMPROVED_DB, PROTOCOL, STUDENTS, is_complete = _module.CONFIG, _module.IMPROVED_DB, _module.PROTOCOL, _module.STUDENTS, _module.is_complete
     if not is_complete():
         if IMPROVED_DB.exists():
             db = read_only(IMPROVED_DB)
@@ -583,7 +612,8 @@ def lr_mainline_outputs():
 # Step 11: Synthetic Positive Control — One Figure (Oracle and Weak-but-Unbiased Teachers)
 
 def positive_control_outputs():
-    from positive_control import METHODS as PC_METHODS, checks, is_complete, load as load_pc, paired
+    _module = import_module('05_synthetic_checks')
+    PC_METHODS, checks, is_complete, load_pc, paired = _module.METHODS, _module.checks, _module.is_complete, _module.load, _module.paired
     if not is_complete():
         print('Positive control incomplete; no figure drawn.', flush=True)
         return
@@ -619,7 +649,8 @@ def positive_control_outputs():
 # Step 12: PP-SSL Anchor — Same 2 × 3 Grid and Colors, Columns Follow the Paper (All / Group A / Group B)
 
 def ppssl_outputs():
-    from ppssl_replication import BOUNDARY, SETUP, check_targets, is_complete, load as load_ppssl, with_best_fixed
+    _module = import_module('05_synthetic_checks')
+    BOUNDARY, SETUP, check_targets, is_complete, load_ppssl, with_best_fixed = _module.BOUNDARY, _module.SETUP, _module.check_targets, _module.ppssl_complete, _module.load_ppssl, _module.with_best_fixed
     if not is_complete():
         print('PP-SSL replication incomplete; no figure drawn.', flush=True)
         return
@@ -673,33 +704,45 @@ def ppssl_outputs():
 # Step 13: Exploratory TabPFN-3.5 Teacher Pilot — Paired With the CatBoost Teacher on the Same Masks
 
 def tabpfn_summary():
-    from teacher_study import TABPFN_DB, TABPFN_GRID
-    rows, audits = load_tabpfn()
-    keys = {(m, b, s) for m in TABPFN_GRID['mechanisms'] for b in TABPFN_GRID['budgets'] for s in TABPFN_GRID['seeds']}
-    if not keys <= set(audits):
-        print(f'TabPFN Teacher pilot incomplete ({len(audits)}/{len(keys)} cases); no summary.', flush=True)
+    rows, audits, scope = tabpfn_results()
+    if scope is None:
+        print('TabPFN Teacher results incomplete; no summary.', flush=True)
         return
     main_rows, _, main_audits = load_main()
-    lr = main_rows.loc[main_rows.student == 'LR'].pivot_table(index=['mechanism', 'budget', 'seed'],
-                                                              columns='training_method', values='macro_f1')
-    tab = rows.pivot_table(index=['mechanism', 'budget', 'seed'], columns='method', values='macro_f1')
-    lam = rows.loc[rows.method == 'PPI selected'].set_index(['mechanism', 'budget', 'seed']).lambda_value
+    cat = main_rows.pivot_table(index=['student', 'mechanism', 'budget', 'seed'], columns='training_method', values='macro_f1')
+    tab = rows.pivot_table(index=['student', 'mechanism', 'budget', 'seed'], columns='method', values='macro_f1')
+    lam = rows.loc[rows.method == 'PPI selected'].set_index(['student', 'mechanism', 'budget', 'seed']).lambda_value
     table = []
-    for key in sorted(keys):
-        a = audits[key]
-        table.append(dict(zip(['mechanism', 'budget', 'seed'], key),
+    for key in sorted(tab.index):
+        a, m = audits[key[1:]], main_audits[key[1:]]
+        table.append(dict(zip(['student', 'mechanism', 'budget', 'seed'], key),
                           supervised=tab.loc[key, 'Supervised'],
                           tabpfn_alone=a['tabpfn_refit_validation']['macro_f1'],
                           tabpfn_teacher_crossfit=a['teacher_validation']['macro_f1'],
-                          catboost_teacher_crossfit=main_audits[key]['teacher_validation']['macro_f1'],
+                          catboost_teacher_crossfit=m['teacher_validation']['macro_f1'],
                           ssl_tabpfn_minus_sup=tab.loc[key, 'SSL soft']-tab.loc[key, 'Supervised'],
                           ppi_tabpfn_minus_sup=tab.loc[key, 'PPI selected']-tab.loc[key, 'Supervised'],
-                          ssl_catboost_minus_sup=lr.loc[key, 'SSL soft']-lr.loc[key, 'Supervised'],
-                          ppi_catboost_minus_sup=lr.loc[key, 'PPI selected']-lr.loc[key, 'Supervised'],
-                          ppi_tabpfn_lambda=lam.loc[key], seconds=a['elapsed_seconds']))
+                          ssl_catboost_minus_sup=cat.loc[key, 'SSL soft']-cat.loc[key, 'Supervised'],
+                          ppi_catboost_minus_sup=cat.loc[key, 'PPI selected']-cat.loc[key, 'Supervised'],
+                          ppi_tabpfn_lambda=lam.loc[key]))
     table = pd.DataFrame(table)
     table.to_csv(RESULTS_DIR/'tabpfn_teacher_summary.csv', index=False, float_format='%.5f')
-    print('Saved: results/tabpfn_teacher_summary.csv')
-    print('\n=== Exploratory TabPFN-3.5 Teacher pilot (MCAR; validation; 5 masks per budget; descriptive) ===')
-    summary = table.drop(columns=['mechanism', 'seed']).groupby('budget').agg(['mean', 'std'])
-    print(summary.round(4).T.to_string())
+    print(f'Saved: results/tabpfn_teacher_summary.csv ({scope} TabPFN Teacher study)')
+    print(f'\n=== TabPFN-3.5 Teacher ({scope}; validation; development set; descriptive) ===')
+    index = ['mechanism', 'budget', 'seed']
+    for student, part in table.groupby('student'):
+        part = part.set_index(index)
+        print(f'\n{student} Student — mean by budget:')
+        print(part.drop(columns='student').groupby(level='budget').mean().round(4).T.to_string())
+        for name, d in [('TabPFN Teacher − CatBoost Teacher (cross-fit Macro F1)', part.tabpfn_teacher_crossfit-part.catboost_teacher_crossfit),
+                        ('TabPFN alone − Supervised', part.tabpfn_alone-part.supervised),
+                        ('PPI − Supervised, TabPFN Teacher', part.ppi_tabpfn_minus_sup),
+                        ('PPI − Supervised, CatBoost Teacher', part.ppi_catboost_minus_sup),
+                        ('PPI (TabPFN) − PPI (CatBoost)', part.ppi_tabpfn_minus_sup-part.ppi_catboost_minus_sup),
+                        ('SSL − Supervised, TabPFN Teacher', part.ssl_tabpfn_minus_sup)]:
+            r = describe(d)
+            print(f"  {name}: {r['mean']:+.4f} [{r['boot_low']:+.4f}, {r['boot_high']:+.4f}] "
+                  f"({r['seeds_positive']}/{r['n_seeds']} seeds positive)")
+
+if __name__ == '__main__':
+    main()

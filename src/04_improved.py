@@ -1,4 +1,8 @@
-# Step 1: Exploratory Improved Pipeline (Protocol improved_v2), Evaluated on Validation Only
+# Step 4: Exploratory Improved Pipeline (improved_v2; Validation Only)
+
+import sys
+from importlib import import_module
+from pathlib import Path
 
 import json
 import sqlite3
@@ -15,16 +19,19 @@ from sklearn.model_selection import KFold
 from sklearn.preprocessing import OneHotEncoder
 from threadpoolctl import threadpool_limits
 
-from config import DEFAULT
-from experiment import metric_row
-from masking import generate_mask
-from model_utils import RESULTS_DIR, load_case
-from ssl_core import (K, NonEstimableCandidate, crossfit_teacher, fit_student, macro_f1, normalized,
-                      prepare_design, probabilities, score, stratified_folds)
-from storage import dumps, fingerprint, fingerprint_differences
-from tree_student import tree_parameters
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # The numbered files import each other by name.
 
-IMPROVED_DB = RESULTS_DIR / 'improved.sqlite'
+common = import_module('00_common')
+DEFAULT, generate_mask, RESULTS_DIR, load_case, dumps, fingerprint = common.DEFAULT, common.generate_mask, common.RESULTS_DIR, common.load_case, common.dumps, common.fingerprint
+fingerprint_differences = common.fingerprint_differences
+methods = import_module('00_methods')
+metric_row, K, NonEstimableCandidate, crossfit_teacher, fit_student, macro_f1 = methods.metric_row, methods.K, methods.NonEstimableCandidate, methods.crossfit_teacher, methods.fit_student, methods.macro_f1
+normalized, prepare_design, probabilities, score, stratified_folds, tree_parameters = methods.normalized, methods.prepare_design, methods.probabilities, methods.score, methods.stratified_folds, methods.tree_parameters
+
+
+# ===== From improved.py — Step 1: Exploratory Improved Pipeline (Protocol improved_v2), Evaluated on Validation Only =====
+
+IMPROVED_DB = RESULTS_DIR / 'databases' / 'improved.sqlite'
 CONFIG = replace(DEFAULT, cv_folds=5, seeds=tuple(range(42, 57)))
 STUDENTS = ('LR', 'XGBoost leaf-refit')
 METHODS = ('Supervised', 'SSL soft', 'PPI CV λ', 'PPI heuristic λ')
@@ -335,3 +342,8 @@ def is_complete():
         db.close()
     expected = len(CONFIG.mechanisms)*len(CONFIG.budgets)*len(CONFIG.seeds)
     return done == expected and 'protocol' in found and json.loads(found['protocol']) == PROTOCOL
+
+
+if __name__ == '__main__':
+    run()
+    import_module('06_figures').improved_outputs()

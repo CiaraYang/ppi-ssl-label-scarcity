@@ -19,16 +19,19 @@ try:  # PyTorch (TabPFN Teacher) must load its OpenMP runtime before XGBoost's o
     import torch  # noqa: F401
 except ImportError:
     pass
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'src'/'core'))
-from config import DEFAULT
-import ablations
-import improved
-import experiment
-import masking
-import model_utils as data
-import selection
-import ssl_core as core
-import storage
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'src'))
+from importlib import import_module
+
+# The numbered src files; aliases keep each test's intent readable.
+data = masking = storage = import_module('00_common')
+core = selection = experiment = import_module('00_methods')
+ablations = import_module('02_ablations')
+TEACHER_STUDY = import_module('03_teacher_study')
+improved = import_module('04_improved')
+SYNTHETIC = import_module('05_synthetic_checks')
+FIGURES = import_module('06_figures')
+FINAL_TEST = import_module('07_final_test')
+DEFAULT = data.DEFAULT
 
 FAST = replace(DEFAULT, teacher_iterations=5, tree_iterations=5, ssl_weights=(0., .1), ssl_thresholds=(0., .95), ppi_lambdas=(0., .5, 1.))
 
@@ -216,7 +219,7 @@ class ModelTests(unittest.TestCase):
 class TreeTests(unittest.TestCase):
     setUp = ModelTests.setUp
     def test_tree_signed_gradient_and_curvature_bound(self):
-        from tree_student import signed_derivatives
+        signed_derivatives = core.signed_derivatives
         from scipy.special import logsumexp
         rng = np.random.default_rng(7)
         logits = rng.normal(size=(40, 4))
@@ -235,7 +238,7 @@ class TreeTests(unittest.TestCase):
 
     def test_tree_supervised_matches_native_xgboost(self):
         import xgboost as xgb
-        from tree_student import tree_parameters
+        tree_parameters = core.tree_parameters
         config = replace(FAST, student_model='XGBoost', tree_iterations=20)
         fitted, _ = core.fit_student(self.XL, self.y, self.XU, self.qL, self.qU, config=config)
         matrix = xgb.DMatrix(self.XL, label=self.y, nthread=1)
@@ -244,7 +247,7 @@ class TreeTests(unittest.TestCase):
 
     def test_tree_ipw_matches_native_weighted_xgboost(self):
         import xgboost as xgb
-        from tree_student import tree_parameters
+        tree_parameters = core.tree_parameters
         config = replace(FAST, student_model='XGBoost', tree_iterations=20)
         wl = core.normalized(np.linspace(.2, 3., len(self.y)))
         fitted, _ = core.fit_student(self.XL, self.y, self.XU, self.qL, self.qU, wl=wl, config=config)
@@ -368,7 +371,7 @@ class AblationTests(unittest.TestCase):
 
     def test_xgboost_rectified_risk_keeps_falling_with_rounds(self):
         # Documents the README caveat: for λ>0 the empirical rectified risk is unbounded below for trees.
-        from tree_student import fit_tree
+        fit_tree = core.fit_tree
         model = ModelTests()
         model.setUp()
         targetL = np.eye(4)[model.y]-model.qL
@@ -456,13 +459,13 @@ class TabPFNTeacherTests(unittest.TestCase):
         predict = core.tabpfn_teacher(case.X[keep], case.y[keep], seed=42)
         first, second = predict(case.U.iloc[:20]), core.tabpfn_teacher(case.X[keep], case.y[keep], seed=42)(case.U.iloc[:20])
         self.assertEqual(first.shape, (20, core.K))
-        np.testing.assert_allclose(first.sum(axis=1), 1., atol=1e-5)
+        np.testing.assert_allclose(first.sum(axis=1), 1., rtol=0, atol=1e-12)  # Exact rows, or λ=1 breaks tree Students.
         np.testing.assert_array_equal(first[:, 2], 0.)
         np.testing.assert_allclose(first, second, atol=1e-6)
         self.assertEqual(predict(case.U.iloc[:0]).shape, (0, core.K))
 
     def test_pilot_is_mcar_only_and_declared(self):
-        import teacher_study
+        teacher_study = TEACHER_STUDY
         self.assertEqual(teacher_study.TABPFN_GRID['mechanisms'], ['MCAR'])
         self.assertEqual(replace(DEFAULT, teacher_model='TabPFN').teacher_model, 'TabPFN')
         self.assertIn('expectations', teacher_study.TABPFN_DECLARATION)
@@ -590,12 +593,12 @@ class VersionProtectionTests(unittest.TestCase):
         old = json.loads(storage.dumps(storage.fingerprint()))
         new = json.loads(json.dumps(old))
         new['config']['cv_folds'] = 9
-        new['source_sha256']['ssl_core.py'] = 'edited'
-        self.assertEqual(storage.fingerprint_differences(old, new), ['config.cv_folds', 'src/core/ssl_core.py'])
+        new['source_sha256']['00_methods.py'] = 'edited'
+        self.assertEqual(storage.fingerprint_differences(old, new), ['config.cv_folds', 'src/00_methods.py'])
         self.assertEqual(storage.fingerprint_differences(old, old), [])
 
     def test_partial_improved_database_is_not_plotted(self):
-        import figures
+        figures = FIGURES
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)/'improved.sqlite'
             with patch.object(improved, 'IMPROVED_DB', path):
@@ -607,7 +610,7 @@ class VersionProtectionTests(unittest.TestCase):
                     figures.improved_outputs()
 
     def test_draft_test_protocol_refuses_to_run(self):
-        import final_test
+        final_test = FINAL_TEST
         self.assertEqual(final_test.FROZEN['status'], 'draft')
         # The draft must match the README proposal: CatBoost → LR is the primary method, with no pooled Teacher rule.
         self.assertEqual(final_test.VARIANTS[0], ('CatBoost', 'LR'))
@@ -623,14 +626,14 @@ class PositiveControlTests(unittest.TestCase):
     SMALL = {'n_train': 1500, 'n_validation': 400}
 
     def test_declaration_names_settings_that_should_and_should_not_benefit(self):
-        import positive_control as pc
+        pc = SYNTHETIC
         rules = {e['rule'] for e in pc.EXPECTATIONS}
         self.assertTrue({'gain', 'no_gain', 'harm', 'no_harm'} <= rules)
         self.assertEqual({e['teacher'] for e in pc.EXPECTATIONS}, set(pc.TEACHERS))
         self.assertIn('expectations', pc.DECLARATION)
 
     def test_teacher_is_a_label_free_function_of_x(self):
-        import positive_control as pc
+        pc = SYNTHETIC
         world = {**pc.WORLD, **self.SMALL}
         beta, intercept = pc.coefficients(world)
         X, y, posterior = pc.sample(500, np.random.default_rng(0), beta, intercept, world)
@@ -646,7 +649,7 @@ class PositiveControlTests(unittest.TestCase):
             np.testing.assert_allclose(pc.teacher_targets(name, posterior, group, noise).sum(axis=1), 1)
 
     def test_synthetic_masks_reuse_make_mask_with_exact_counts_and_known_weights(self):
-        import positive_control as pc
+        pc = SYNTHETIC
         rng = np.random.default_rng(3)
         X = np.hstack([rng.normal(size=(2000, 3)), np.zeros((2000, 1))])
         y = rng.integers(0, core.K, 2000)
@@ -663,7 +666,7 @@ class PositiveControlTests(unittest.TestCase):
         self.assertLess(visible[y == 1].mean(), visible[y != 1].mean())
 
     def test_selection_falls_back_without_cv_and_stays_on_the_grid(self):
-        import positive_control as pc
+        pc = SYNTHETIC
         rng = np.random.default_rng(4)
         XL, XU = np.hstack([rng.normal(size=(40, 3)), np.ones((40, 1))]), np.hstack([rng.normal(size=(300, 3)), np.ones((300, 1))])
         qL, qU = rng.dirichlet(np.ones(core.K), 40), rng.dirichlet(np.ones(core.K), 300)
@@ -677,7 +680,7 @@ class PositiveControlTests(unittest.TestCase):
         self.assertIn(selected['soft']['weight'], FAST.ssl_weights)
 
     def test_small_case_runs_and_lambda_zero_is_exactly_supervised(self):
-        import positive_control as pc
+        pc = SYNTHETIC
         world = {**pc.WORLD, **self.SMALL}
         rows, audit = pc.run_case('MCAR', 50, 42, world, ('oracle', 'uninformative'), FAST)
         table = pd.DataFrame(rows).set_index(['teacher', 'method'])
@@ -688,7 +691,7 @@ class PositiveControlTests(unittest.TestCase):
         self.assertAlmostEqual(table.loc[('oracle', 'Teacher'), 'macro_f1'], table.loc[('none', 'Bayes'), 'macro_f1'])
 
     def test_expectation_rules_and_seed_bootstrap(self):
-        import positive_control as pc
+        pc = SYNTHETIC
         index = pd.MultiIndex.from_product([['MCAR'], [50, 1000], range(10)], names=['mechanism', 'budget', 'seed'])
         sup = pd.DataFrame({'mechanism': index.get_level_values(0), 'budget': index.get_level_values(1),
                             'seed': index.get_level_values(2), 'teacher': 'none', 'method': 'Supervised', 'macro_f1': .5})
@@ -703,7 +706,7 @@ class PositiveControlTests(unittest.TestCase):
 
 class LRMainlineTests(unittest.TestCase):
     def test_seed_cluster_bootstrap_and_describe(self):
-        import figures as lr_mainline
+        lr_mainline = FIGURES
         index = pd.MultiIndex.from_product([['MCAR', 'MAR'], [50, 100], range(5)], names=lr_mainline.KEY)
         constant = pd.Series(.01, index=index)
         np.testing.assert_allclose(lr_mainline.seed_cluster_bootstrap(constant), [.01, .01])
@@ -717,7 +720,7 @@ class LRMainlineTests(unittest.TestCase):
         self.assertEqual((summary['better'], summary['worse'], summary['equal']), (10, 5, 5))
 
     def test_lambda_sources_separate_cv_zero_from_forced_fallback(self):
-        import figures as lr_mainline
+        lr_mainline = FIGURES
         def audit(lam, policy, extra=None):
             return {'students': {'LR': {'ppi_selected_lambda': lam, 'selection_policy': policy, **(extra or {})}}}
         audits = {('MCAR', 50, 42): audit(0., 'supervised_fallback: fewer than two visible labels in a class'),
@@ -730,7 +733,7 @@ class LRMainlineTests(unittest.TestCase):
 
     def test_main_study_tables_cover_all_masks_read_only(self):
         import hashlib
-        import figures as lr_mainline
+        lr_mainline = FIGURES
         before = hashlib.sha256(data.DB_PATH.read_bytes()).hexdigest()
         rows, audits = lr_mainline.main_lr()
         table, contrasts = lr_mainline.paired_uncertainty(rows)
@@ -744,7 +747,7 @@ class LRMainlineTests(unittest.TestCase):
 
 class PPSSLReplicationTests(unittest.TestCase):
     def test_data_follow_the_paper_groups_and_oracle_teacher(self):
-        import ppssl_replication as pp
+        pp = SYNTHETIC
         (labeled, unlabeled, test), _ = pp.make_data(0., 0)
         X, y, f, group_b = test
         self.assertEqual((len(labeled[0]), len(unlabeled[0]), len(X)), (20, 1000, 1000))
@@ -752,7 +755,7 @@ class PPSSLReplicationTests(unittest.TestCase):
         np.testing.assert_array_equal(X[:, -2], group_b)  # The group indicator is an input feature.
 
     def test_rectifier_vanishes_when_pseudo_labels_are_the_labels(self):
-        import ppssl_replication as pp
+        pp = SYNTHETIC
         rng = np.random.default_rng(0)
         X = np.hstack([rng.normal(size=(30, 3)), np.ones((30, 1))])
         y = X @ np.array([1., -2., .5, .3])+rng.normal(size=30)
@@ -764,7 +767,7 @@ class PPSSLReplicationTests(unittest.TestCase):
         self.assertGreater(pp.ppi_plus_plus_lambda(X, y, y, XU, fU), .5)
 
     def test_online_lambda_stays_in_unit_interval_and_drops_for_a_useless_teacher(self):
-        import ppssl_replication as pp
+        pp = SYNTHETIC
         setup = {**pp.SETUP, 'steps': 400}
         (labeled, unlabeled, _), _ = pp.make_data(7., 1, setup)
         noise = np.random.default_rng(2).normal(scale=20, size=len(unlabeled[2]))

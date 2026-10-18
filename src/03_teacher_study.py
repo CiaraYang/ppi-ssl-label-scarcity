@@ -1,4 +1,12 @@
-# Step 1: Same-Architecture Teachers and Label-Free Preprocessing, in a Separate Database
+# Step 3: Teacher Study — Same-Architecture Teachers, Label-Free Preprocessing, TabPFN-3.5 Teachers
+
+try:  # PyTorch (TabPFN Teacher) must load its OpenMP runtime before XGBoost's on macOS, or TabPFN segfaults.
+    import torch  # noqa: F401
+except ImportError:
+    pass
+import sys
+from importlib import import_module
+from pathlib import Path
 
 import argparse
 import json
@@ -9,12 +17,18 @@ from itertools import product
 import pandas as pd
 from joblib import Parallel, delayed, parallel_config
 
-from config import DEFAULT
-from experiment import run_case
-from model_utils import DB_PATH, RESULTS_DIR
-from storage import dumps, fingerprint, fingerprint_differences, stored_fingerprint_warning
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # The numbered files import each other by name.
 
-STUDY_DB = RESULTS_DIR / 'teacher_study.sqlite'
+common = import_module('00_common')
+DEFAULT, DB_PATH, RESULTS_DIR, dumps, fingerprint, fingerprint_differences = common.DEFAULT, common.DB_PATH, common.RESULTS_DIR, common.dumps, common.fingerprint, common.fingerprint_differences
+stored_fingerprint_warning = common.stored_fingerprint_warning
+methods = import_module('00_methods')
+run_case = methods.run_case
+
+
+# ===== From teacher_study.py — Step 1: Same-Architecture Teachers and Label-Free Preprocessing, in a Separate Database =====
+
+STUDY_DB = RESULTS_DIR / 'databases' / 'teacher_study.sqlite'
 PROTOCOL = 'teacher_study_v1'
 # (Teacher, Student, preprocessing fit). CatBoost→Student on labeled-only preprocessing is the main study itself.
 VARIANTS = [('LR', 'LR', 'labeled'), ('XGBoost', 'XGBoost', 'labeled'),
@@ -177,7 +191,7 @@ def cv_selected_teacher(rows, audits, student, design):
 
 # Step 5: Exploratory Pretrained-Teacher Pilot — TabPFN-3.5 → LR (MCAR, 100 and 500 Labels, Validation Only)
 
-TABPFN_DB = RESULTS_DIR / 'tabpfn_teacher.sqlite'
+TABPFN_DB = RESULTS_DIR / 'databases' / 'tabpfn_teacher.sqlite'
 TABPFN_VARIANT = ('TabPFN', 'LR', 'labeled')
 TABPFN_GRID = {'mechanisms': ['MCAR'], 'budgets': [100, 500], 'seeds': list(DEFAULT.seeds)}
 # Stored before the first result. Added after the main validation results were known, so it is exploratory.
@@ -248,9 +262,9 @@ def run_tabpfn_pilot():
 
 
 def tabpfn_alone(mechanism, budget, seed):
-    from masking import generate_mask
-    from model_utils import load_case
-    from ssl_core import score, tabpfn_teacher
+    generate_mask = common.generate_mask
+    load_case = common.load_case
+    score, tabpfn_teacher = methods.score, methods.tabpfn_teacher
     data = load_case(generate_mask(budget, seed, mechanism))
     return score(tabpfn_teacher(data.X, data.y, seed)(data.V), data.vy)
 
@@ -278,11 +292,103 @@ def load_tabpfn():
     return rows, audits
 
 
+# Step 6: Full TabPFN-3.5 Teacher Study — All 75 Main-Study Masks, LR and XGBoost Students (Validation Only)
+
+TABPFN_FULL_DB = RESULTS_DIR / 'databases' / 'tabpfn_teacher_full.sqlite'
+TABPFN_FULL_CONFIG = replace(DEFAULT, teacher_model='TabPFN')  # Both Students share one cross-fitted Teacher per case.
+# Only files that change the fitted models; plotting or README edits must not block resuming a multi-hour run.
+COMPUTE_SOURCES = ['00_common.py', '00_methods.py']
+# Stored before the first result. Declared after the MCAR pilot (10 of these 75 masks, LR only) had been seen.
+TABPFN_FULL_DECLARATION = {
+    'name': 'tabpfn_teacher_full_v1', 'declared_on': '2026-10-17', 'role': 'exploratory; main study unchanged',
+    'grid': '3 mechanisms × budgets 50–1,000 × seeds 42–46 = the 75 main-study masks; LR and XGBoost Students',
+    'teacher': 'TabPFN-3.5, pinned checkpoint tabpfn-v3.5-20260909.safetensors (synthetic-only pretraining), visible '
+               'labels as context; cross-fitted and nested in training CV exactly like the CatBoost Teacher',
+    'deviation': 'TabPFN takes no sample weights, so under MAR the Teacher is unweighted (CatBoost used IPW weights); '
+                 'the Students keep IPW. Under MNAR neither Teacher is weighted',
+    'replay': "each Student's Supervised fit must equal the main study exactly; the 10 pilot masks are compared with "
+              "the pilot (Teacher rows are now renormalized, so tiny differences are possible)",
+    'history': 'a first attempt (2026-10-17) failed on 69/75 cases: TabPFN float32 rows summed to 1 + 1e-7, giving a '
+               'negative row mass at λ=1 that the XGBoost Student rejects. Fixed by renormalizing Teacher rows; the run '
+               'was restarted from scratch and its 6 completed cases were discarded',
+    'expectations': ['E1: TabPFN Teacher (cross-fit) Macro F1 > CatBoost Teacher, pooled over the 75 masks',
+                     'E2: LR PPI − Supervised with TabPFN is not materially larger (< +0.005) than with CatBoost (pilot)',
+                     'E3: XGBoost PPI − Supervised shows no reliable gain with either Teacher (unbounded tree objective)',
+                     'E4: TabPFN alone beats the Supervised LR Student at 500 and 1,000 labels under MCAR',
+                     'MAR and MNAR: reported descriptively; no direction declared'],
+    'analysis': 'paired with the CatBoost Teacher on the same masks; seed-cluster intervals (5 seeds, descriptive)',
+}
+
+
+def tabpfn_full_fingerprint():
+    import hashlib
+    import importlib.metadata
+    from pathlib import Path
+    DATA_PATH, SPLIT_PATH = common.DATA_PATH, common.SPLIT_PATH
+    core = Path(__file__).parent
+    return json.loads(dumps({
+        'config': TABPFN_FULL_CONFIG.to_dict(), 'declaration': TABPFN_FULL_DECLARATION,
+        'data_sha256': hashlib.sha256(DATA_PATH.read_bytes()).hexdigest(),
+        'split_sha256': hashlib.sha256(SPLIT_PATH.read_bytes()).hexdigest(),
+        'source_sha256': {n: hashlib.sha256((core/n).read_bytes()).hexdigest() for n in COMPUTE_SOURCES},
+        'versions': {n: importlib.metadata.version(n) for n in
+                     ['numpy', 'pandas', 'scipy', 'scikit-learn', 'xgboost', 'tabpfn', 'torch']}}))
+
+
+def read_only_main_supervised_all():
+    db = sqlite3.connect(f'file:{DB_PATH}?mode=ro', uri=True)
+    try:
+        return {(m, b, s, method): f for m, b, s, method, f in db.execute(
+            "SELECT mechanism,budget,seed,method,macro_f1 FROM metrics WHERE method LIKE '% / Supervised'")}
+    finally:
+        db.close()
+
+
+def run_tabpfn_full():
+    """Sequential (one Apple-GPU process); each finished case is committed, so an interrupted run resumes."""
+    import torch  # noqa: F401  (PyTorch's OpenMP runtime must load before XGBoost's on macOS)
+    connect_main_schema, save_case, set_metadata, get_metadata = common.connect, common.save_case, common.set_metadata, common.get_metadata
+    keys = list(product(DEFAULT.mechanisms, DEFAULT.budgets, DEFAULT.seeds))
+    with connect_main_schema(TABPFN_FULL_DB) as db:
+        done = {tuple(r) for r in db.execute("SELECT mechanism,budget,seed FROM cases WHERE status='complete'")}
+        if set(keys) <= done:
+            print('Full TabPFN Teacher study already complete; nothing to run.', flush=True)
+            return
+        current, previous = tabpfn_full_fingerprint(), get_metadata(db, 'fingerprint')
+        if previous is not None and previous != current:
+            raise ValueError('Model code, data or package versions changed since this study started; '
+                             'move tabpfn_teacher_full.sqlite aside to rerun.')
+        set_metadata(db, 'fingerprint', current)
+        set_metadata(db, 'declaration', TABPFN_FULL_DECLARATION)
+        main = read_only_main_supervised_all()
+        tasks = [key for key in keys if key not in done]
+        print(f'{len(tasks)} TabPFN Teacher cases to run sequentially | {len(done)} done', flush=True)
+        for count, key in enumerate(tasks, 1):
+            mechanism, budget, seed = key
+            try:
+                rows, audit = run_case(budget, mechanism, seed, TABPFN_FULL_CONFIG)
+                audit['tabpfn_refit_validation'] = tabpfn_alone(*key)
+                for row in rows:  # The Supervised Students never see the Teacher: they must equal the main study.
+                    if row['method'].endswith('/ Supervised') and row['macro_f1'] != main[(*key, row['method'])]:
+                        raise RuntimeError(f"ReplayMismatch: {row['method']} {row['macro_f1']} vs main {main[(*key, row['method'])]}")
+                error = None
+            except Exception as exc:
+                rows, audit, error = [], {}, f'{type(exc).__name__}: {exc}'
+            save_case(db, key, rows, audit, error)
+            print(f'[{count}/{len(tasks)}] {key} {"FAILED: "+error if error else "saved"} '
+                  f'({audit.get("elapsed_seconds", 0):.0f} s)', flush=True)
+        failed = db.execute("SELECT COUNT(*) FROM cases WHERE status!='complete'").fetchone()[0]
+        set_metadata(db, 'status', 'complete_with_failures' if failed else 'complete')
+    if failed:
+        raise RuntimeError(f'{failed} TabPFN Teacher cases failed; see {TABPFN_FULL_DB.name}.')
+
+
 def main():
-    parser = argparse.ArgumentParser(description='Same-architecture Teachers, label-free preprocessing and the TabPFN pilot.')
+    parser = argparse.ArgumentParser(description='Same-architecture Teachers, label-free preprocessing and TabPFN Teachers.')
     parser.add_argument('--workers', type=int, default=8)
     run_study(parser.parse_args().workers)
     run_tabpfn_pilot()
+    run_tabpfn_full()
 
 
 if __name__ == '__main__':
