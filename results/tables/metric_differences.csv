@@ -1,0 +1,33 @@
+teacher,student,metric,method,n_masks,n_seeds,mean,cluster_se,boot_low,boot_high,seeds_positive,better,worse,equal
+CatBoost,LR,Macro F1,SSL soft,75,5,-0.00519,0.00145,-0.00782,-0.00306,0,7,32,36
+CatBoost,LR,Macro F1,PPI selected,75,5,0.00184,0.00030,0.00134,0.00235,5,33,19,23
+CatBoost,LR,Balanced Accuracy,SSL soft,75,5,-0.00321,0.00099,-0.00483,-0.00156,0,7,32,36
+CatBoost,LR,Balanced Accuracy,PPI selected,75,5,0.00252,0.00030,0.00201,0.00302,5,38,14,23
+CatBoost,LR,Accuracy,SSL soft,75,5,0.00209,0.00141,0.00012,0.00482,4,29,10,36
+CatBoost,LR,Accuracy,PPI selected,75,5,-0.00276,0.00109,-0.00460,-0.00091,0,23,28,24
+CatBoost,LR,Log Loss Reduction,SSL soft,75,5,0.01248,0.00444,0.00521,0.02099,5,34,5,36
+CatBoost,LR,Log Loss Reduction,PPI selected,75,5,-0.02057,0.00892,-0.03633,-0.00566,1,15,37,23
+CatBoost,XGBoost,Macro F1,SSL soft,75,5,-0.00350,0.00191,-0.00697,-0.00077,1,18,22,35
+CatBoost,XGBoost,Macro F1,PPI selected,75,5,-0.00244,0.00030,-0.00297,-0.00192,0,20,19,36
+CatBoost,XGBoost,Balanced Accuracy,SSL soft,75,5,-0.00210,0.00115,-0.00427,-0.00027,1,15,25,35
+CatBoost,XGBoost,Balanced Accuracy,PPI selected,75,5,-0.00336,0.00048,-0.00414,-0.00259,0,16,23,36
+CatBoost,XGBoost,Accuracy,SSL soft,75,5,-0.00003,0.00053,-0.00088,0.00088,3,26,12,37
+CatBoost,XGBoost,Accuracy,PPI selected,75,5,-0.00256,0.00072,-0.00381,-0.00130,0,19,20,36
+CatBoost,XGBoost,Log Loss Reduction,SSL soft,75,5,0.00059,0.00113,-0.00125,0.00281,3,25,15,35
+CatBoost,XGBoost,Log Loss Reduction,PPI selected,75,5,-0.00451,0.00241,-0.00940,-0.00145,0,17,22,36
+TabPFN,LR,Macro F1,SSL soft,75,5,-0.00417,0.00182,-0.00774,-0.00177,0,15,33,27
+TabPFN,LR,Macro F1,PPI selected,75,5,0.00481,0.00109,0.00275,0.00643,5,38,17,20
+TabPFN,LR,Balanced Accuracy,SSL soft,75,5,-0.00209,0.00094,-0.00383,-0.00077,0,19,29,27
+TabPFN,LR,Balanced Accuracy,PPI selected,75,5,0.00482,0.00072,0.00337,0.00567,5,42,13,20
+TabPFN,LR,Accuracy,SSL soft,75,5,0.00198,0.00048,0.00118,0.00277,5,39,9,27
+TabPFN,LR,Accuracy,PPI selected,75,5,-0.00042,0.00105,-0.00212,0.00127,3,28,26,21
+TabPFN,LR,Log Loss Reduction,SSL soft,75,5,0.01565,0.00345,0.01164,0.02253,5,47,1,27
+TabPFN,LR,Log Loss Reduction,PPI selected,75,5,-0.00607,0.00703,-0.01802,0.00588,2,20,35,20
+TabPFN,XGBoost,Macro F1,SSL soft,75,5,-0.00512,0.00246,-0.00988,-0.00140,1,13,22,40
+TabPFN,XGBoost,Macro F1,PPI selected,75,5,-0.00026,0.00085,-0.00173,0.00120,2,26,22,27
+TabPFN,XGBoost,Balanced Accuracy,SSL soft,75,5,-0.00296,0.00154,-0.00580,-0.00058,1,12,23,40
+TabPFN,XGBoost,Balanced Accuracy,PPI selected,75,5,-0.00146,0.00078,-0.00280,-0.00015,1,26,22,27
+TabPFN,XGBoost,Accuracy,SSL soft,75,5,-0.00033,0.00085,-0.00189,0.00110,3,19,16,40
+TabPFN,XGBoost,Accuracy,PPI selected,75,5,-0.00231,0.00070,-0.00340,-0.00108,1,18,29,28
+TabPFN,XGBoost,Log Loss Reduction,SSL soft,75,5,0.00321,0.00087,0.00153,0.00467,5,25,10,40
+TabPFN,XGBoost,Log Loss Reduction,PPI selected,75,5,-0.00132,0.00216,-0.00500,0.00241,3,27,21,27

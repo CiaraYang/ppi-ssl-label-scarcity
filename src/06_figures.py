@@ -1,6 +1,7 @@
 # Step 6: All Figures and Tables From the Saved Databases (Reads Only)
 
 import json
+import html
 import sqlite3
 import sys
 from importlib import import_module
@@ -72,12 +73,24 @@ MECHANISMS = list(DEFAULT.mechanisms)
 VIOLET = '#6250d6'
 
 
+def right_row_label(ax, label):
+    # Step 2a: Put every Student / Teacher row label vertically on the outer right edge.
+    ax.text(1.065, .5, label, transform=ax.transAxes, rotation=270,
+            ha='center', va='center', fontsize=13, fontweight='bold', clip_on=False, gid='row-label')
+
+
 def six_panel(row_labels, mechanisms=None):
     """2 × 3 grid (MCAR / MAR / MNAR); a study run on fewer mechanisms gets only those columns."""
     mechanisms = MECHANISMS if mechanisms is None else mechanisms
     fig, axes = plt.subplots(2, len(mechanisms), figsize=(14*len(mechanisms)/3+(1 if len(mechanisms) < 3 else 0), 7.6),
                              sharex=True, sharey='row', layout='constrained')
     for row, label in enumerate(row_labels):
+        row_name = None
+        if '\n' in label:
+            row_name, label = label.split('\n', 1)
+            row_name = {'LR': 'LR Student', 'XGBoost leaf-refit': 'XGBoost leaf-refit Student',
+                        'oracle Teacher': 'Oracle Teacher', 'noise σ=3 Teacher': 'Noisy Teacher (σ = 3)'}.get(row_name, row_name)
+        label = label.replace('Validation Macro F1', 'Macro F1')
         for column, mechanism in enumerate(mechanisms):
             ax = axes[row, column]
             ax.set_xscale('log')
@@ -88,9 +101,11 @@ def six_panel(row_labels, mechanisms=None):
             if row == 0:
                 ax.set_title(mechanism)
             else:
-                ax.set_xlabel('Visible training labels')
+                ax.set_xlabel('Visible training labels (n)')
             if column == 0:
-                ax.set_ylabel(label)
+                ax.set_ylabel(label, fontsize=12)
+        if row_name:
+            right_row_label(axes[row, -1], row_name)
     return fig, axes
 
 
@@ -115,6 +130,8 @@ PALETTE = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6
 
 def recolor(axes):
     slots = {}
+    method_colors = {'Supervised': BLUE, 'SSL soft': ORANGE, 'PPI selected': AQUA,
+                     'PPI CV λ': AQUA, 'PPI heuristic λ': VIOLET, 'PPI λ=1': VIOLET}
     for ax in axes.flat:
         for line in ax.get_lines():
             label = line.get_label()
@@ -122,6 +139,10 @@ def recolor(axes):
                 continue
             if label.startswith('Fully labeled') or str(line.get_color()).lower() == INK:
                 line.set_linestyle('--')  # Reference / threshold lines: dashed, black (a second reference stays gray).
+                continue
+            if label in method_colors:
+                line.set_color(method_colors[label])
+                line.set_linestyle('-')
                 continue
             if line.get_linestyle() not in ('None', ''):
                 line.set_linestyle('-')  # Data lines: all solid; series differ by color and marker.
@@ -147,9 +168,22 @@ def finish(fig, axes, title, name):
 
 
 def save(fig, name):
-    fig.savefig(RESULTS_DIR/name, dpi=180, facecolor='white')
+    folders = {'teacher_quality.png': '04_teacher_quality', 'ppi_gains.png': '05_ablations',
+               'xgboost_sensitivity.png': '05_ablations', 'improved_gains.png': '05_ablations',
+               'positive_control.png': '06_synthetic', 'ppssl_replication.png': '06_synthetic'}
+    relative = Path('figures')/folders[name]/name if name in folders else Path(name)
+    path = RESULTS_DIR/relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.canvas.draw()
+    for ax in fig.axes:
+        for text in ax.texts:
+            if text.get_gid() == 'row-label':
+                box = text.get_window_extent(fig.canvas.get_renderer())
+                if box.x0 < 0 or box.y0 < 0 or box.x1 > fig.bbox.width or box.y1 > fig.bbox.height:
+                    raise ValueError(f'Row label clipped in {name}: {text.get_text()}')
+    fig.savefig(path, dpi=180, facecolor='white')
     plt.close(fig)
-    print(f'Saved: results/{name}', flush=True)
+    print(f'Saved: results/{relative}', flush=True)
 
 
 def by_case(rows, mechanism, column='macro_f1'):
@@ -159,19 +193,91 @@ def by_case(rows, mechanism, column='macro_f1'):
 # Step 3: Figure 1 — Main Study Learning Curves (Macro F1; LR Top, XGBoost Bottom)
 
 def learning_curves(main, reference, audits):
-    teacher = pd.DataFrame([dict(mechanism=m, budget=b, seed=s, macro_f1=a['teacher_validation']['macro_f1'])
-                            for (m, b, s), a in audits.items()])
-    fig, axes = six_panel([f'{s} Student\nValidation Macro F1' for s in DEFAULT.student_models])
-    for row, student in enumerate(DEFAULT.student_models):
-        for column, mechanism in enumerate(MECHANISMS):
-            ax = axes[row, column]
-            for method, color, marker in zip(METHODS, [BLUE, ORANGE, AQUA], ['o', 's', '^']):
-                band(ax, by_case(main.loc[(main.student == student) & (main.training_method == method)], mechanism),
-                     method, color, marker)
-            band(ax, by_case(teacher, mechanism), 'CatBoost Teacher (cross-fit)', TEACHER_GRAY, 'D', ':')
-            ax.axhline(reference[student]['macro_f1'], color=INK, linestyle='--', linewidth=1.4,
-                       label='Fully labeled Student (same architecture)')
-    finish(fig, axes, 'Classification Performance under Label Scarcity', 'learning_curves.png')
+    # Step 3a: Fix the Teacher per figure; compare Students in rows and methods within each panel.
+    groups = {'CatBoost': main.drop(columns='method').rename(columns={'training_method': 'method'})}
+    tabpfn, _, scope = tabpfn_results()
+    if scope == 'full':
+        groups['TabPFN'] = tabpfn
+    for teacher, rows in groups.items():
+        fig, axes = six_panel([f'{s} Student\nValidation Macro F1' for s in DEFAULT.student_models])
+        for row, student in enumerate(DEFAULT.student_models):
+            for column, mechanism in enumerate(MECHANISMS):
+                ax = axes[row, column]
+                for method, color, marker in zip(METHODS, [BLUE, ORANGE, AQUA], ['o', 's', '^']):
+                    selected = rows.loc[(rows.student == student) & (rows.method == method)]
+                    band(ax, by_case(selected, mechanism), method, color, marker)
+                ax.axhline(reference[student]['macro_f1'], color=INK, linestyle='--', linewidth=1.4,
+                           label=f'Fully labeled Student ({reference[student]["labeled_count"]:,} labels)')
+        # Share scales across Teachers so visual differences remain comparable.
+        for row, student in enumerate(DEFAULT.student_models):
+            values = pd.concat([g.loc[g.student == student, 'macro_f1'] for g in groups.values()])
+            low, high = min(values.min(), reference[student]['macro_f1']), max(values.max(), reference[student]['macro_f1'])
+            axes[row, 0].set_ylim(max(0, low-.02), min(1, high+.02))
+        finish(fig, axes, f'{teacher} Teacher: Classification Performance',
+               f'figures/01_learning_curves/{teacher.lower()}.png')
+
+    # Step 3b: Two gain curves per panel; black zero line is the matched Supervised baseline.
+    differences = {}
+    for teacher, rows in groups.items():
+        wide = rows.pivot(index=['student', 'mechanism', 'budget', 'seed'], columns='method', values='macro_f1')
+        differences[teacher] = wide[['SSL soft', 'PPI selected']].sub(wide.Supervised, axis=0)
+    limit = max(.01, max(np.abs(d.groupby(level=['student', 'mechanism', 'budget']).mean().to_numpy()).max()
+                         for d in differences.values())+.005)
+    for teacher, delta in differences.items():
+        fig, axes = six_panel([f'{s} Student\nMacro F1 − Supervised' for s in DEFAULT.student_models])
+        for row, student in enumerate(DEFAULT.student_models):
+            for column, mechanism in enumerate(MECHANISMS):
+                ax = axes[row, column]
+                for method, color, marker in [('SSL soft', ORANGE, 's'), ('PPI selected', AQUA, '^')]:
+                    band(ax, delta.loc[(student, mechanism), method], method, color, marker)
+                zero_line(ax)
+                ax.set_ylim(-limit, limit)
+        finish(fig, axes, f'{teacher} Teacher: Macro F1 Gain over Supervised',
+               f'figures/02_gains/{teacher.lower()}.png')
+
+    # Step 3c: One metric table instead of a separate figure for every metric.
+    table = pd.concat([rows.assign(teacher=teacher) for teacher, rows in groups.items()], ignore_index=True)
+    metrics = ['macro_f1', 'accuracy', 'balanced_accuracy', 'log_loss']
+    summary = table.groupby(['teacher', 'student', 'mechanism', 'budget', 'method'])[metrics].agg(['mean', 'std'])
+    summary.columns = ['_'.join(c) for c in summary.columns]
+    summary['n_seeds'] = table.groupby(['teacher', 'student', 'mechanism', 'budget', 'method']).seed.nunique()
+    folder = RESULTS_DIR/'tables'
+    folder.mkdir(exist_ok=True)
+    summary.to_csv(folder/'metrics_summary.csv', float_format='%.6f')
+    class_f1_heatmap(groups)
+    metric_differences(groups)
+
+
+def class_f1_heatmap(groups):
+    # Step 3d: Keep all budgets and mechanisms visible; average paired class-F1 changes over masks.
+    columns = pd.MultiIndex.from_product([MECHANISMS, BUDGETS], names=['mechanism', 'budget'])
+    matrices = {}
+    for teacher, rows in groups.items():
+        for student in DEFAULT.student_models:
+            part = rows.loc[rows.student == student].copy()
+            for k, label in enumerate(CLASSES):
+                part[label] = part.class_f1.map(lambda v: json.loads(v)[k] if isinstance(v, str) else v[k])
+            sup = part.loc[part.method == 'Supervised'].set_index(KEY)[CLASSES]
+            ppi = part.loc[part.method == 'PPI selected'].set_index(KEY)[CLASSES]
+            matrices[teacher, student] = (ppi-sup).groupby(level=['mechanism', 'budget']).mean().reindex(columns).T
+    limit = max(.005, max(np.abs(m.to_numpy()).max() for m in matrices.values()))
+    fig, axes = plt.subplots(len(groups), 2, figsize=(16, 3.5*len(groups)), squeeze=False, layout='constrained')
+    for row, teacher in enumerate(groups):
+        for col, student in enumerate(DEFAULT.student_models):
+            ax = axes[row, col]
+            matrix = matrices[teacher, student]
+            im = ax.imshow(matrix, cmap='RdBu', vmin=-limit, vmax=limit, aspect='auto')
+            ax.set_title(f'{teacher} Teacher → {student} Student', pad=30)
+            ax.set_yticks(range(len(CLASSES)), CLASSES)
+            ax.set_xticks(range(len(columns)), [str(b) for _, b in columns], rotation=45)
+            for center, mechanism in zip([2, 7, 12], MECHANISMS):
+                ax.text(center, 1.02, mechanism, transform=ax.get_xaxis_transform(), ha='center', fontsize=9)
+            for boundary in [4.5, 9.5]:
+                ax.axvline(boundary, color='white', linewidth=2)
+            ax.set_xlabel('Visible training labels')
+    fig.colorbar(im, ax=axes.ravel().tolist(), label='Per-class F1 − Supervised (blue = improvement)', shrink=.8)
+    fig.suptitle('PPI: Per-class F1 Gain over Supervised', fontsize=12)
+    save(fig, 'figures/03_class_f1/ppi_vs_supervised.png')
 
 
 # Step 4: Figure 2 — Are the Teachers Better Than the Student They Teach?
@@ -190,11 +296,11 @@ def teacher_quality(main, audits, study_audits, extra):
             ax = axes[row, column]
             band(ax, by_case(supervised, mechanism), 'Student trained Supervised', BLUE, 'o')
             band(ax, by_case(catboost, mechanism), 'CatBoost Teacher (cross-fit, used for pseudo-labels)', TEACHER_GRAY, 'D', ':')
-            band(ax, by_case(refit, mechanism), 'CatBoost Teacher refit on all visible labels', TEACHER_GRAY, 'D', '--')
+            band(ax, by_case(refit, mechanism), 'CatBoost Teacher (trained on n visible labels)', TEACHER_GRAY, 'D', '--')
             band(ax, by_case(same, mechanism), 'Same-architecture Teacher (cross-fit)', VIOLET, 'v', '-.')
             if not tabpfn.empty and mechanism in set(tabpfn.mechanism):
                 band(ax, by_case(tabpfn, mechanism), 'TabPFN-3.5 Teacher (pretrained; cross-fit)', MUTED, 'X', '-')
-                band(ax, by_case(tabpfn, mechanism, 'alone'), 'TabPFN-3.5 alone (all visible labels as context)',
+                band(ax, by_case(tabpfn, mechanism, 'alone'), 'TabPFN-3.5 alone (n visible labels as context)',
                      MUTED, 'P', ':')
     finish(fig, axes, 'Teacher and Supervised Student Performance', 'teacher_quality.png')
 
@@ -208,7 +314,7 @@ def tabpfn_results():
         try:
             done = db.execute("SELECT COUNT(*) FROM cases WHERE status='complete'").fetchone()[0]
             if done == len(DEFAULT.mechanisms)*len(DEFAULT.budgets)*len(DEFAULT.seeds):
-                rows = pd.read_sql_query('SELECT mechanism,budget,seed,method,macro_f1,lambda_value FROM metrics', db)
+                rows = pd.read_sql_query('SELECT * FROM metrics', db)
                 audits = {(m, b, s): json.loads(a) for m, b, s, a in
                           db.execute("SELECT mechanism,budget,seed,audit FROM cases WHERE status='complete'")}
                 rows[['student', 'method']] = rows.method.str.split(' / ', expand=True)
@@ -219,7 +325,7 @@ def tabpfn_results():
     keys = set(product(TABPFN_GRID['mechanisms'], TABPFN_GRID['budgets'], TABPFN_GRID['seeds']))
     if rows.empty or not keys <= set(audits):
         return pd.DataFrame(), {}, None
-    return rows.assign(student='LR')[['student', 'mechanism', 'budget', 'seed', 'method', 'macro_f1', 'lambda_value']], audits, 'pilot'
+    return rows.assign(student='LR'), audits, 'pilot'
 
 
 def tabpfn_teacher_scores():
@@ -335,6 +441,109 @@ def main():
     tabpfn_summary()  # Exploratory TabPFN-3.5 Teacher pilot (MCAR, 100/500 labels), if it has run.
     positive_control_outputs()  # Synthetic studies draw only when complete.
     ppssl_outputs()
+    write_figure_index()
+
+
+METRICS = [('macro_f1', 1, 'Macro F1'), ('balanced_accuracy', 1, 'Balanced Accuracy'),
+           ('accuracy', 1, 'Accuracy'), ('log_loss', -1, 'Log Loss Reduction')]
+
+
+def metric_differences(groups):
+    # Step 7a: Paired change vs Supervised for every metric, oriented so that positive = better (log loss is negated).
+    rows = []
+    for teacher, data in groups.items():
+        for student in DEFAULT.student_models:
+            part = data.loc[data.student == student]
+            for metric, sign, label in METRICS:
+                wide = part.pivot_table(index=KEY, columns='method', values=metric)
+                for method in ['SSL soft', 'PPI selected']:
+                    r = describe(sign*(wide[method]-wide.Supervised))
+                    rows.append(dict(teacher=teacher, student=student, metric=label, method=method, **r))
+    table = pd.DataFrame(rows)
+    table.to_csv(RESULTS_DIR/'tables'/'metric_differences.csv', index=False, float_format='%.5f')
+    print('Saved: results/tables/metric_differences.csv', flush=True)
+
+    # Main-report figure: LR Student only (XGBoost is in the CSV); rows = Teachers, columns = metrics.
+    teachers = list(groups)
+    fig, axes = plt.subplots(len(teachers), len(METRICS), figsize=(14, 2.3*len(teachers)+1.2), sharey=True,
+                             layout='constrained', squeeze=False)
+    lr = table.loc[table.student == 'LR']
+    for col, (_, _, label) in enumerate(METRICS):
+        values = lr.loc[lr.metric == label, ['boot_low', 'boot_high']].to_numpy()
+        span = max(abs(values).max(), .002)*1.25
+        for row, teacher in enumerate(teachers):
+            ax = axes[row, col]
+            ax.axvline(0, color=INK, linestyle='--', linewidth=1.2, label='Supervised (difference = 0)')
+            for y, (method, color, marker) in zip([1, 0], [('SSL soft', ORANGE, 's'), ('PPI selected', AQUA, '^')]):
+                r = lr.loc[(lr.teacher == teacher) & (lr.metric == label) & (lr.method == method)].iloc[0]
+                ax.errorbar(r['mean'], y, xerr=[[r['mean']-r.boot_low], [r.boot_high-r['mean']]], fmt=marker,
+                            color=color, markersize=8, capsize=3, linewidth=1.6, label=method)
+                ax.annotate(f"{r['mean']:+.4f}", (r['mean'], y), xytext=(0, 9), textcoords='offset points',
+                            ha='center', fontsize=9)
+            ax.set_xlim(-span, span)
+            ax.xaxis.set_major_locator(matplotlib.ticker.MaxNLocator(nbins=4, symmetric=True))
+            ax.xaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter('%+.3f'))
+            ax.set_ylim(-.6, 1.6)
+            ax.set_yticks([1, 0], ['SSL soft', 'PPI selected'])
+            ax.grid(axis='x', alpha=.18)
+            if row == 0:
+                ax.set_title(label)
+            if row == len(teachers)-1:
+                ax.set_xlabel('Change vs Supervised (→ better)')
+            if col == len(METRICS)-1:
+                right_row_label(ax, f'{teacher} Teacher')
+    handles = {l: h for ax in axes.flat for h, l in zip(*ax.get_legend_handles_labels())}
+    fig.legend(handles.values(), handles.keys(), loc='outside lower center', ncol=len(handles), frameon=False)
+    fig.suptitle('LR Student: Metric Changes Relative to Supervised', fontsize=12)
+    save(fig, 'figures/07_metrics/paired_differences.png')
+
+
+def write_figure_index():
+    # Step 7a: One visual index; group plots by question rather than by experiment execution order.
+    sections = [('01_learning_curves', 'Learning Curves', '每个 Teacher 一张图；上排 LR，下排 XGBoost。三条方法线加全部 labels 的参考线。'),
+                ('02_gains', 'Gains over Supervised', '每个 Teacher 一张图；只比较 SSL、PPI 相对 Supervised 的改善。大于零更好。'),
+                ('03_class_f1', 'Per-class F1', 'PPI 改善了哪些 classes？蓝色为改善，红色为下降；颜色范围一致。'),
+                ('04_teacher_quality', 'Teacher Quality', '单独检查 Teacher 的预测质量。'),
+                ('05_ablations', 'Additional Experiments', 'Teacher/λ、XGBoost 和 improved pipeline 的补充比较。'),
+                ('06_synthetic', 'Synthetic Checks', '合成数据上的检查，不是 aircraft Test results。')]
+    titles = {'catboost': 'CatBoost Teacher', 'tabpfn': 'TabPFN Teacher',
+              'ppi_vs_supervised': 'PPI: Per-class F1 Gain', 'teacher_quality': 'Teacher Quality',
+              'ppi_gains': 'Teacher and λ Ablations', 'xgboost_sensitivity': 'XGBoost Sensitivity',
+              'improved_gains': 'Ensemble Teacher', 'positive_control': 'Positive Control',
+              'ppssl_replication': 'PP-SSL Synthetic Regression',
+              'paired_differences': 'Metric Changes Relative to Supervised'}
+    parts = ['<!doctype html><html lang="zh"><meta charset="utf-8"><title>CS 680 Results</title>',
+             '<style>body{max-width:1200px;margin:32px auto;padding:0 20px;font:16px/1.6 system-ui;color:#18212b;background:#fafbfc}'
+             'nav{position:sticky;top:0;background:white;padding:12px;border-bottom:1px solid #ddd}a{color:#2469b3;margin-right:18px}'
+             'section{scroll-margin-top:80px;margin:44px 0}figure{margin:24px 0;background:white;border:1px solid #ddd;padding:12px}'
+             'img{width:100%;height:auto}table{border-collapse:collapse;width:100%;background:white}th,td{padding:8px;border-bottom:1px solid #ddd;text-align:left}'
+             'h1,h2,h3{line-height:1.3}</style><h1>CS 680 Results</h1>',
+             '<p>全部为 Validation / development results。曲线是各 masks 的平均值；不重跑训练。</p>',
+             '<nav>'+''.join(f'<a href="#{key}">{label}</a>' for key, label, _ in sections)+'<a href="#metrics">Metrics</a></nav>']
+    for key, label, explanation in sections:
+        parts.append(f'<section id="{key}"><h2>{label}</h2><p>{explanation}</p>')
+        for path in sorted((RESULTS_DIR/'figures'/key).glob('*.png')):
+            relative = html.escape(path.relative_to(RESULTS_DIR).as_posix(), quote=True)
+            parts.append(f'<figure><h3>{titles.get(path.stem, path.stem)}</h3><a href="{relative}"><img src="{relative}" loading="lazy"></a></figure>')
+        parts.append('</section>')
+    for old in ['catboost.png', 'tabpfn.png']:  # Superseded by paired_differences.png.
+        (RESULTS_DIR/'figures/07_metrics'/old).unlink(missing_ok=True)
+    parts += ['<section id="metrics"><h2>Metrics</h2><p>LR Student：SSL、PPI 相对 Supervised 的配对变化，向右为更好（Log Loss 取负）；误差线为按 seed 重抽样的 95% 区间。PPI 改善 class-balanced 指标（Macro F1、Balanced Accuracy），SSL 改善 Accuracy 与 Log Loss。XGBoost 的同样结果见 tables/metric_differences.csv。</p>']
+    for path in sorted((RESULTS_DIR/'figures/07_metrics').glob('*.png')):
+        relative = path.relative_to(RESULTS_DIR).as_posix()
+        parts.append(f'<figure><h3>{titles.get(path.stem, path.stem)}</h3><a href="{relative}"><img src="{relative}" loading="lazy"></a></figure>')
+    parts += ['<p><a href="tables/metrics_summary.csv">下载完整数据表（含 Balanced Accuracy、各条件的 mean / SD / seed count）</a></p></section></html>']
+    (RESULTS_DIR/'index.html').write_text('\n'.join(parts))
+
+    # Remove only superseded top-level PNG copies once every replacement exists.
+    replacements = {'learning_curves.png': '01_learning_curves/catboost.png',
+                    **{name: folder+'/'+name for name, folder in {
+                        'teacher_quality.png': '04_teacher_quality', 'ppi_gains.png': '05_ablations',
+                        'xgboost_sensitivity.png': '05_ablations', 'improved_gains.png': '05_ablations',
+                        'positive_control.png': '06_synthetic', 'ppssl_replication.png': '06_synthetic'}.items()}}
+    for name, replacement in replacements.items():
+        if (RESULTS_DIR/'figures'/replacement).exists():
+            (RESULTS_DIR/name).unlink(missing_ok=True)
 
 
 # Step 8: Final Test Evaluation (Written Only After 07_final_test.py Has Run Once)

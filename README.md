@@ -42,14 +42,31 @@ PPI:        mean_L[a·(CE(Y) − λ·CE(qL))] + λ·mean_U[b·CE(qU)],   λ ∈ 
 
 ## Outputs (`results/`)
 
-| File (databases in `results/databases/`) | Content |
+Open **`results/index.html`** for the grouped figure gallery and the metric comparison table.
+
+| Folder | What to compare |
 |---|---|
-| `experiments.sqlite`, `learning_curves.png` | Main study (Macro F1 vs labels; LR top, XGBoost bottom) |
-| `teacher_study.sqlite`, `teacher_quality.png` | Teachers (CatBoost, same-architecture, TabPFN) vs the Supervised Student |
-| `ppi_gains.png` | **Main result**: SSL / PPI gain over Supervised on the same mask (incl. λ fixed at 1 and the TabPFN Teacher) |
-| `ablations.sqlite`, `xgboost_sensitivity.png` | A1–A3. The figure is 2×2: A2/A3 were declared on MCAR and MAR only (100 and 500 labels) |
+| `figures/01_learning_curves/` | One figure per Teacher (CatBoost / TabPFN); LR and XGBoost in separate rows; Supervised, SSL, PPI and the fully labeled reference |
+| `figures/02_gains/` | One figure per Teacher; SSL / PPI Macro F1 minus the matched Supervised score |
+| `figures/03_class_f1/` | PPI minus Supervised per-class F1, paired over seeds, at every budget and mechanism |
+| `figures/04_teacher_quality/` | Teacher prediction quality, kept separate from Student learning curves |
+| `figures/05_ablations/` | Additional Teacher/λ comparisons, XGBoost sensitivity and the exploratory ensemble pipeline |
+| `figures/06_synthetic/` | Positive control and adapted PP-SSL regression experiment |
+| `figures/07_metrics/` | LR Student: SSL and PPI change vs Supervised on Macro F1, Balanced Accuracy, Accuracy and Log Loss (positive = better; seed-cluster 95% intervals) |
+| `tables/metric_differences.csv` | The same paired changes for both Teachers and both Students |
+| `tables/metrics_summary.csv` | Macro F1, Accuracy, Balanced Accuracy and Log Loss: mean, SD and seed count per setting |
+
+All real-data figures report Validation/development results. Main curves show mask means, not confidence intervals.
+The gain panels use a shared vertical scale across Teachers. Log Loss is lower-is-better.
+Run `src/06_figures.py` to regenerate these outputs from the saved databases without training models.
+
+| Saved database or analysis table | Content |
+|---|---|
+| `experiments.sqlite` | Main study (Macro F1 vs labels; LR top, XGBoost bottom) |
+| `teacher_study.sqlite` | Same-architecture Teachers and preprocessing comparisons |
+| `ablations.sqlite` | A1–A3; XGBoost sensitivity was run on MCAR and MAR only (100 and 500 labels) |
 | `lr_paired_uncertainty.csv`, `lr_ablation_questions.csv` | LR paired differences with bootstrap intervals (overall and per class); ablations as questions |
-| `improved.sqlite`, `improved_gains.png` | Exploratory improved_v2 |
+| `improved.sqlite` | Exploratory improved_v2 |
 | `positive_control.*`, `ppssl_replication.*` | Synthetic checks (database, figure, and verdicts on the pre-declared checks) |
 | `tabpfn_teacher_full.sqlite`, `tabpfn_teacher_summary.csv` | TabPFN-3.5 Teacher on all 75 masks, LR and XGBoost Students (`tabpfn_teacher.sqlite` = the earlier MCAR pilot) |
 
