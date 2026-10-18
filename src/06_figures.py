@@ -1,7 +1,6 @@
 # Step 6: All Figures and Tables From the Saved Databases (Reads Only)
 
 import json
-import html
 import sqlite3
 import sys
 from importlib import import_module
@@ -441,7 +440,6 @@ def main():
     tabpfn_summary()  # Exploratory TabPFN-3.5 Teacher pilot (MCAR, 100/500 labels), if it has run.
     positive_control_outputs()  # Synthetic studies draw only when complete.
     ppssl_outputs()
-    write_figure_index()
 
 
 METRICS = [('macro_f1', 1, 'Macro F1'), ('balanced_accuracy', 1, 'Balanced Accuracy'),
@@ -498,52 +496,6 @@ def metric_differences(groups):
     save(fig, 'figures/07_metrics/paired_differences.png')
 
 
-def write_figure_index():
-    # Step 7a: One visual index; group plots by question rather than by experiment execution order.
-    sections = [('01_learning_curves', 'Learning Curves', '每个 Teacher 一张图；上排 LR，下排 XGBoost。三条方法线加全部 labels 的参考线。'),
-                ('02_gains', 'Gains over Supervised', '每个 Teacher 一张图；只比较 SSL、PPI 相对 Supervised 的改善。大于零更好。'),
-                ('03_class_f1', 'Per-class F1', 'PPI 改善了哪些 classes？蓝色为改善，红色为下降；颜色范围一致。'),
-                ('04_teacher_quality', 'Teacher Quality', '单独检查 Teacher 的预测质量。'),
-                ('05_ablations', 'Additional Experiments', 'Teacher/λ、XGBoost 和 improved pipeline 的补充比较。'),
-                ('06_synthetic', 'Synthetic Checks', '合成数据上的检查，不是 aircraft Test results。')]
-    titles = {'catboost': 'CatBoost Teacher', 'tabpfn': 'TabPFN Teacher',
-              'ppi_vs_supervised': 'PPI: Per-class F1 Gain', 'teacher_quality': 'Teacher Quality',
-              'ppi_gains': 'Teacher and λ Ablations', 'xgboost_sensitivity': 'XGBoost Sensitivity',
-              'improved_gains': 'Ensemble Teacher', 'positive_control': 'Positive Control',
-              'ppssl_replication': 'PP-SSL Synthetic Regression',
-              'paired_differences': 'Metric Changes Relative to Supervised'}
-    parts = ['<!doctype html><html lang="zh"><meta charset="utf-8"><title>CS 680 Results</title>',
-             '<style>body{max-width:1200px;margin:32px auto;padding:0 20px;font:16px/1.6 system-ui;color:#18212b;background:#fafbfc}'
-             'nav{position:sticky;top:0;background:white;padding:12px;border-bottom:1px solid #ddd}a{color:#2469b3;margin-right:18px}'
-             'section{scroll-margin-top:80px;margin:44px 0}figure{margin:24px 0;background:white;border:1px solid #ddd;padding:12px}'
-             'img{width:100%;height:auto}table{border-collapse:collapse;width:100%;background:white}th,td{padding:8px;border-bottom:1px solid #ddd;text-align:left}'
-             'h1,h2,h3{line-height:1.3}</style><h1>CS 680 Results</h1>',
-             '<p>全部为 Validation / development results。曲线是各 masks 的平均值；不重跑训练。</p>',
-             '<nav>'+''.join(f'<a href="#{key}">{label}</a>' for key, label, _ in sections)+'<a href="#metrics">Metrics</a></nav>']
-    for key, label, explanation in sections:
-        parts.append(f'<section id="{key}"><h2>{label}</h2><p>{explanation}</p>')
-        for path in sorted((RESULTS_DIR/'figures'/key).glob('*.png')):
-            relative = html.escape(path.relative_to(RESULTS_DIR).as_posix(), quote=True)
-            parts.append(f'<figure><h3>{titles.get(path.stem, path.stem)}</h3><a href="{relative}"><img src="{relative}" loading="lazy"></a></figure>')
-        parts.append('</section>')
-    for old in ['catboost.png', 'tabpfn.png']:  # Superseded by paired_differences.png.
-        (RESULTS_DIR/'figures/07_metrics'/old).unlink(missing_ok=True)
-    parts += ['<section id="metrics"><h2>Metrics</h2><p>LR Student：SSL、PPI 相对 Supervised 的配对变化，向右为更好（Log Loss 取负）；误差线为按 seed 重抽样的 95% 区间。PPI 改善 class-balanced 指标（Macro F1、Balanced Accuracy），SSL 改善 Accuracy 与 Log Loss。XGBoost 的同样结果见 tables/metric_differences.csv。</p>']
-    for path in sorted((RESULTS_DIR/'figures/07_metrics').glob('*.png')):
-        relative = path.relative_to(RESULTS_DIR).as_posix()
-        parts.append(f'<figure><h3>{titles.get(path.stem, path.stem)}</h3><a href="{relative}"><img src="{relative}" loading="lazy"></a></figure>')
-    parts += ['<p><a href="tables/metrics_summary.csv">下载完整数据表（含 Balanced Accuracy、各条件的 mean / SD / seed count）</a></p></section></html>']
-    (RESULTS_DIR/'index.html').write_text('\n'.join(parts))
-
-    # Remove only superseded top-level PNG copies once every replacement exists.
-    replacements = {'learning_curves.png': '01_learning_curves/catboost.png',
-                    **{name: folder+'/'+name for name, folder in {
-                        'teacher_quality.png': '04_teacher_quality', 'ppi_gains.png': '05_ablations',
-                        'xgboost_sensitivity.png': '05_ablations', 'improved_gains.png': '05_ablations',
-                        'positive_control.png': '06_synthetic', 'ppssl_replication.png': '06_synthetic'}.items()}}
-    for name, replacement in replacements.items():
-        if (RESULTS_DIR/'figures'/replacement).exists():
-            (RESULTS_DIR/name).unlink(missing_ok=True)
 
 
 # Step 8: Final Test Evaluation (Written Only After 07_final_test.py Has Run Once)

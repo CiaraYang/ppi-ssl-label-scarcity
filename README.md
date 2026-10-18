@@ -42,8 +42,6 @@ PPI:        mean_L[a·(CE(Y) − λ·CE(qL))] + λ·mean_U[b·CE(qU)],   λ ∈ 
 
 ## Outputs (`results/`)
 
-Open **`results/index.html`** for the grouped figure gallery and the metric comparison table.
-
 | Folder | What to compare |
 |---|---|
 | `figures/01_learning_curves/` | One figure per Teacher (CatBoost / TabPFN); LR and XGBoost in separate rows; Supervised, SSL, PPI and the fully labeled reference |
