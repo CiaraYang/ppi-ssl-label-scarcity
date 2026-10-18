@@ -12,21 +12,10 @@ Experiments examine how label availability and Teacher quality affect classifica
 
 | Folder / File | Description |
 |---|---|
-| [data/](data/) | Raw dataset, split assignments, and split metadata |
-| [00_common.py](src/00_common.py) | Configuration, data preparation, features, preprocessing, and label masks |
-| [00_methods.py](src/00_methods.py) | Models, training objectives, cross-fitting, and evaluation |
-| [01_main_study.py](src/01_main_study.py) | Main CatBoost Teacher experiments |
-| [02_ablations.py](src/02_ablations.py) | Fixed-λ and XGBoost sensitivity experiments |
-| [03_teacher_study.py](src/03_teacher_study.py) | Alternative Teachers, preprocessing comparisons, and TabPFN experiments |
-| [04_improved.py](src/04_improved.py) | Exploratory ensemble and alternative training pipeline |
-| [05_synthetic_checks.py](src/05_synthetic_checks.py) | Synthetic checks and adapted PP-SSL regression experiments |
-| [06_figures.py](src/06_figures.py) | Figures and summary tables |
-| [07_final_test.py](src/07_final_test.py) | Final test evaluation, currently locked as a draft |
-| [results/](results/) | Original results and the separate v2 directory |
-| [results/v2/databases/](results/v2/databases/) | Saved v2 experiments |
-| [results/v2/figures/](results/v2/figures/) | Current figures |
-| [results/v2/tables/](results/v2/tables/) | Summary tables |
-| [tests/test_protocol.py](tests/test_protocol.py) | Protocol and implementation tests |
+| [data/](data/) | Dataset and split assignments |
+| [src/](src/) | Models, experiments, and plotting scripts |
+| [results/](results/) | Experiment results, figures, and tables |
+| [tests/](tests/) | Protocol and implementation tests |
 | [requirements.txt](requirements.txt) | Python dependencies |
 
 ### Experimental Setup
