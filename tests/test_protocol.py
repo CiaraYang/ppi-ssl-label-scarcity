@@ -32,6 +32,7 @@ SYNTHETIC = import_module('05_synthetic_checks')
 FIGURES = import_module('06_figures')
 FINAL_TEST = import_module('07_final_test')
 DEFAULT = data.DEFAULT
+K = core.K  # 4 classes in v1, 3 in v2; the fixtures below follow the active task version
 
 FAST = replace(DEFAULT, teacher_iterations=5, tree_iterations=5, ssl_weights=(0., .1), ssl_thresholds=(0., .95), ppi_lambdas=(0., .5, 1.))
 
@@ -124,16 +125,16 @@ class ModelTests(unittest.TestCase):
         self.L, self.U = rng.normal(size=(40, 5)), rng.normal(size=(24, 5))
         self.XL = csr_matrix(np.c_[self.L, np.ones(40)])
         self.XU = csr_matrix(np.c_[self.U, np.ones(24)])
-        self.y = np.tile(np.arange(4), 10)
-        self.qL = core.softmax(rng.normal(size=(40, 4)), axis=1)
-        self.qU = core.softmax(rng.normal(size=(24, 4)), axis=1)
+        self.y = np.arange(40) % K
+        self.qL = core.softmax(rng.normal(size=(40, K)), axis=1)
+        self.qU = core.softmax(rng.normal(size=(24, K)), axis=1)
 
     def test_weighted_signed_gradient(self):
         rng = np.random.default_rng(5)
         wl, wu = core.normalized(rng.uniform(.2, 4, 40)), core.normalized(rng.uniform(.2, 4, 24))
         for strength in [0., .5, 1.]:
-            args = self.XL, wl[:, None]*(np.eye(4)[self.y]-strength*self.qL), self.XU, strength*wu[:, None]*self.qU, 1/40
-            error = check_grad(lambda w: core.objective(w, *args)[0], lambda w: core.objective(w, *args)[1], rng.normal(size=24))
+            args = self.XL, wl[:, None]*(np.eye(K)[self.y]-strength*self.qL), self.XU, strength*wu[:, None]*self.qU, 1/40
+            error = check_grad(lambda w: core.objective(w, *args)[0], lambda w: core.objective(w, *args)[1], rng.normal(size=6*K))
             self.assertLess(error, 1e-5)
 
     def test_supervised_ipw_matches_sklearn(self):
@@ -153,7 +154,7 @@ class ModelTests(unittest.TestCase):
         sample_weight = np.r_[.5*core.normalized(wl), soft_weight.ravel()]
         with threadpool_limits(limits=1):
             fitted, _ = core.fit_student(self.XL, self.y, self.XU, self.qL, self.qU, 'soft', wl=wl, wu=wu, weight=.5, threshold=.5)
-            reference = LogisticRegression(C=1., max_iter=5000, tol=1e-10).fit(np.r_[self.L, np.repeat(U, 4, axis=0)], np.r_[self.y, np.tile(np.arange(4), len(U))], sample_weight=sample_weight)
+            reference = LogisticRegression(C=1., max_iter=5000, tol=1e-10).fit(np.r_[self.L, np.repeat(U, K, axis=0)], np.r_[self.y, np.tile(np.arange(K), len(U))], sample_weight=sample_weight)
         np.testing.assert_allclose(core.probabilities(self.XL, fitted), reference.predict_proba(self.L), atol=2e-5)
 
     def test_zero_weight_lambda_and_empty_selection_match_supervised(self):
@@ -165,19 +166,19 @@ class ModelTests(unittest.TestCase):
 
     def test_absent_class_is_explicit_not_an_error_or_fake_label(self):
         y = self.y.copy()
-        y[y==3] = 0
-        qL, qU = np.eye(4)[y], np.tile([.5, .25, .25, 0.], (24, 1))
+        y[y==K-1] = 0
+        qL, qU = np.eye(K)[y], np.tile(np.r_[.5, np.full(K-2, .5/(K-2)), 0.], (24, 1))
         with threadpool_limits(limits=1):
             fitted, _ = core.fit_student(self.XL, y, self.XU, qL, qU)
-        np.testing.assert_array_equal(core.probabilities(self.XL, fitted)[:, 3], 0.)
+        np.testing.assert_array_equal(core.probabilities(self.XL, fitted)[:, K-1], 0.)
 
     def test_nonpositive_corrected_mass_rejected(self):
         with self.assertRaises(core.NonEstimableCandidate):
-            core.fit_student(self.XL, self.y, self.XU, np.tile([0., 0., 0., 1.], (40, 1)), np.tile([1., 0., 0., 0.], (24, 1)), 'ppi', 1.)
+            core.fit_student(self.XL, self.y, self.XU, np.tile(np.eye(K)[K-1], (40, 1)), np.tile(np.eye(K)[0], (24, 1)), 'ppi', 1.)
 
     def test_fifty_label_rare_class_uses_declared_fallback(self):
         case = data.load_case(masking.generate_mask(50, 42, 'MCAR'))
-        self.assertEqual(np.bincount(case.y, minlength=4).min(), 1)
+        self.assertEqual(np.bincount(case.y, minlength=K).min(), 1)
         with patch.object(selection, 'crossfit_teacher', side_effect=AssertionError('No selection Teacher should fit')):
             settings, audit = selection.select_settings(case)
         self.assertEqual(audit['cv_folds'], 0)
@@ -187,7 +188,7 @@ class ModelTests(unittest.TestCase):
     def test_teacher_own_labels_excluded_and_missing_columns_aligned(self):
         X = pd.DataFrame({'value': range(12)}, index=[f'L{i}' for i in range(12)])
         U = pd.DataFrame({'value': [100]}, index=['U'])
-        y = np.array([0]*6+[1]*5+[3])
+        y = np.array([0]*6+[1 if K > 3 else 0]*5+[K-1])  # class K-2 is absent
         class Spy:
             def __init__(self, **kwargs):pass
             def fit(self, table, values, **kwargs):
@@ -201,14 +202,14 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(policy, 'kfold_class_alignment')
         np.testing.assert_allclose(qL.sum(axis=1), 1.)
         np.testing.assert_allclose(qU.sum(axis=1), 1.)
-        np.testing.assert_array_equal(qL[:, 2], 0.)
+        np.testing.assert_array_equal(qL[:, K-2], 0.)
 
     def test_nested_selection_teachers_exclude_outer_holdout(self):
         case = data.load_case(masking.generate_mask(100, 42, 'MCAR'))
         seen = []
         def teacher(X, y, U, **kwargs):
             seen.append(set(X.index))
-            return np.eye(4)[y], np.full((len(U), 4), .25), None, 'spy'
+            return np.eye(K)[y], np.full((len(U), K), 1/K), None, 'spy'
         with patch.object(selection, 'crossfit_teacher', side_effect=teacher), threadpool_limits(limits=1):
             _, audit = selection.select_settings(case, config=FAST)
         expected = [set(case.X.iloc[ids].index) for ids, _ in core.stratified_folds(case.y, 42, FAST)]
@@ -222,14 +223,14 @@ class TreeTests(unittest.TestCase):
         signed_derivatives = core.signed_derivatives
         from scipy.special import logsumexp
         rng = np.random.default_rng(7)
-        logits = rng.normal(size=(40, 4))
+        logits = rng.normal(size=(40, K))
         for strength in [0., .5, 1.]:
-            target = np.linspace(.2, 3., 40)[:, None]*(np.eye(4)[self.y]-strength*self.qL)
+            target = np.linspace(.2, 3., 40)[:, None]*(np.eye(K)[self.y]-strength*self.qL)
             def loss(x):
-                x = x.reshape(40, 4)
+                x = x.reshape(40, K)
                 return -np.sum(target*(x-logsumexp(x, axis=1, keepdims=True)))
             def gradient(x):
-                return signed_derivatives(x.reshape(40, 4), target)[0].ravel().astype(float)
+                return signed_derivatives(x.reshape(40, K), target)[0].ravel().astype(float)
             self.assertLess(check_grad(loss, gradient, logits.ravel()), 1e-4)
             _, diagonal = signed_derivatives(logits, target)
             for p, mass, bound in zip(core.softmax(logits, axis=1), target.sum(axis=1), diagonal):
@@ -242,7 +243,7 @@ class TreeTests(unittest.TestCase):
         config = replace(FAST, student_model='XGBoost', tree_iterations=20)
         fitted, _ = core.fit_student(self.XL, self.y, self.XU, self.qL, self.qU, config=config)
         matrix = xgb.DMatrix(self.XL, label=self.y, nthread=1)
-        reference = xgb.train(tree_parameters(config, 4), matrix, num_boost_round=config.tree_iterations)
+        reference = xgb.train(tree_parameters(config, K), matrix, num_boost_round=config.tree_iterations)
         np.testing.assert_allclose(core.probabilities(self.XL, fitted), reference.predict(matrix), atol=2e-6)
 
     def test_tree_ipw_matches_native_weighted_xgboost(self):
@@ -252,7 +253,7 @@ class TreeTests(unittest.TestCase):
         wl = core.normalized(np.linspace(.2, 3., len(self.y)))
         fitted, _ = core.fit_student(self.XL, self.y, self.XU, self.qL, self.qU, wl=wl, config=config)
         matrix = xgb.DMatrix(self.XL, label=self.y, weight=wl, nthread=1)
-        reference = xgb.train(tree_parameters(config, 4), matrix, num_boost_round=config.tree_iterations)
+        reference = xgb.train(tree_parameters(config, K), matrix, num_boost_round=config.tree_iterations)
         np.testing.assert_allclose(core.probabilities(self.XL, fitted), reference.predict(matrix), atol=2e-6)
 
     def test_tree_zero_lambda_and_zero_ssl_are_exact_baselines(self):
@@ -374,8 +375,8 @@ class AblationTests(unittest.TestCase):
         fit_tree = core.fit_tree
         model = ModelTests()
         model.setUp()
-        targetL = np.eye(4)[model.y]-model.qL
-        risks = [fit_tree(model.XL, targetL, model.XU, model.qU, np.ones(4, bool),
+        targetL = np.eye(K)[model.y]-model.qL
+        risks = [fit_tree(model.XL, targetL, model.XU, model.qU, np.ones(K, bool),
                           replace(FAST, student_model='XGBoost', tree_iterations=rounds)).diagnostics['empirical_risk_final']
                  for rounds in [50, 200]]
         self.assertLess(risks[1], risks[0])
@@ -501,10 +502,10 @@ class ImprovedTests(unittest.TestCase):
 
     def test_heuristic_lambda_closed_form_and_informative_teacher(self):
         rng = np.random.default_rng(3)
-        P = core.softmax(rng.normal(size=(40, 4)), axis=1)
-        perfect = np.eye(4)[self.y]  # g_f = g_Y, so tr Cov = tr Var and λ = 1/(1 + n/N).
+        P = core.softmax(rng.normal(size=(40, K)), axis=1)
+        perfect = np.eye(K)[self.y]  # g_f = g_Y, so tr Cov = tr Var and λ = 1/(1 + n/N).
         self.assertAlmostEqual(improved.heuristic_lambda(self.XL, self.y, P, perfect, np.ones(40), 24), 1/(1+40/24), places=10)
-        informative = .7*np.eye(4)[self.y]+.3*self.qL
+        informative = .7*np.eye(K)[self.y]+.3*self.qL
         self.assertGreater(improved.heuristic_lambda(self.XL, self.y, P, informative, np.ones(40), 24), 0)
 
     def test_ensemble_teacher_predictions_exclude_own_labels(self):
@@ -541,8 +542,8 @@ class ImprovedTests(unittest.TestCase):
 
     def test_threshold_rule_never_lowers_out_of_fold_macro_f1(self):
         rng = np.random.default_rng(2)
-        y = rng.integers(0, 4, 300)
-        P = core.softmax(rng.normal(size=(300, 4))+np.eye(4)[y]*np.array([2., .3, .3, 1.]), axis=1)
+        y = rng.integers(0, K, 300)
+        P = core.softmax(rng.normal(size=(300, K))+np.eye(K)[y]*np.array([2., .3, .3, 1.])[:K], axis=1)
         bias = improved.fit_bias(P, y, np.ones(300))
         self.assertEqual(bias[0], 0.)
         self.assertGreaterEqual(core.macro_f1(y, improved.biased(P, bias).argmax(axis=1)), core.macro_f1(y, P.argmax(axis=1)))
@@ -623,9 +624,8 @@ class V2SettingTests(unittest.TestCase):
     def test_three_class_map_merges_only_written_off(self):
         self.assertEqual(data.CLASS_MAP['destroyed'], data.CLASS_MAP['damaged beyond repair'])
         self.assertEqual(len(set(data.CLASS_MAP.values())), 3)
-        self.assertEqual(data.VERSION, 'v1')        # the default task is unchanged
-        self.assertEqual(len(data.CLASSES), 4)
-        self.assertEqual(len(data.FEATURES), 7)
+        # v1 is the default task; v2 (PPI_VERSION=v2) adds 3 classes and the five contextual features.
+        self.assertEqual((len(data.CLASSES), len(data.FEATURES)), (4, 7) if data.VERSION == 'v1' else (3, 12))
 
     def test_ensemble_teacher_is_the_mean_of_catboost_and_lr_on_the_same_rows(self):
         case = data.load_case(masking.generate_mask(100, 42, 'MCAR'))
@@ -673,6 +673,12 @@ class VersionProtectionTests(unittest.TestCase):
         # The draft must match the README proposal: CatBoost → LR is the primary method, with no pooled Teacher rule.
         self.assertEqual(final_test.VARIANTS[0], ('CatBoost', 'LR'))
         self.assertIn('Secondary only', final_test.FROZEN['teacher_rule'])
+        if data.VERSION == 'v2':  # v2: TabPFN → LR is co-primary, and every variant has stored validation audits
+            self.assertEqual(final_test.VARIANTS[1], ('TabPFN', 'LR'))
+            audits = final_test.validation_audits()
+            for variant in final_test.VARIANTS:
+                for key in [('MCAR', 50, 42), ('MNAR', 1000, 46)]:
+                    final_test.expected(audits, *variant, key)  # raises KeyError if a stored run is missing
         with patch.object(final_test, 'connect', side_effect=AssertionError('Test database touched')), \
              self.assertRaises(RuntimeError):
             final_test.run()
@@ -680,6 +686,7 @@ class VersionProtectionTests(unittest.TestCase):
 
 # Step 10: Synthetic Positive Control, LR Main-Line Analysis and the PP-SSL Anchor
 
+@unittest.skipUnless(data.VERSION == 'v1', 'synthetic worlds are 4-class and task-independent; run once under v1')
 class PositiveControlTests(unittest.TestCase):
     SMALL = {'n_train': 1500, 'n_validation': 400}
 

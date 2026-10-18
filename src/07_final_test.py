@@ -19,14 +19,14 @@ DEFAULT, DB_PATH, RESULTS_DIR, dumps, fingerprint, fingerprint_differences = com
 methods = import_module('00_methods')
 fully_labeled_reference, run_case = methods.fully_labeled_reference, methods.run_case
 _teacher_study = import_module('03_teacher_study')
-STUDY_DB, variant_name = _teacher_study.STUDY_DB, _teacher_study.variant_name
+STUDY_DB, variant_name, full_db, FULL_TEACHERS = _teacher_study.STUDY_DB, _teacher_study.variant_name, _teacher_study.full_db, _teacher_study.FULL_TEACHERS
 
 
 # ===== From final_test.py — Step 1: Frozen, One-Shot Test Evaluation of the Final Method and Its Pre-Declared Comparisons =====
 
 FINAL_DB = RESULTS_DIR / 'databases' / 'final_test.sqlite'
 # Written to the database before any Test score exists; the run refuses to start if it ever differs.
-FROZEN = {
+FROZEN_V1 = {
     'status': 'draft',  # Set to 'final' (with a date) only when the author freezes the protocol; run() refuses a draft.
     'frozen_on': None,
     'final_method': 'Primary (the proposal design): LR Student with a cross-fitted CatBoost Teacher; labeled-only '
@@ -45,7 +45,34 @@ FROZEN = {
     'disclosure': 'validation was used as a development set; the protocol was revised after viewing it',
     'models': 'identical to the validation runs (fits never see the evaluation split); only the scored split changes',
 }
-VARIANTS = [('CatBoost', 'LR'), ('LR', 'LR'), ('CatBoost', 'XGBoost')]
+# v2 (PPI_VERSION=v2): same one-shot procedure on the v2 task; CatBoost and TabPFN-3.5 are co-primary Teachers.
+FROZEN_V2 = {
+    'status': 'draft',  # Set to 'final' (with a date) only when the author freezes the protocol; run() refuses a draft.
+    'frozen_on': None,
+    'task': 'v2: 3 classes (written off / substantial / minor), 7 original + 5 contextual features',
+    'final_method': 'Co-primary: LR Student with a cross-fitted CatBoost Teacher, and LR Student with a cross-fitted '
+                    'TabPFN-3.5 Teacher (pinned checkpoint, visible labels as context); labeled-only preprocessing; SSL '
+                    'weight and PPI λ chosen by training CV Macro F1 on the visible labels (main-study grids); argmax '
+                    'decisions. Each Teacher is reported separately; no Teacher selection',
+    'primary_claims': 'For each primary Teacher, pooled over 75 masks, mean with a seed-cluster interval (5 seeds; '
+                      'descriptive): "improvement" only if PPI − Supervised stays above 0, "robustness" only if '
+                      'PPI − SSL soft stays above 0; Macro F1 is primary, Balanced Accuracy, Accuracy and Log Loss are '
+                      'reported whatever the outcome',
+    'teacher_rule': 'Secondary only: the Ensemble Teacher (mean of cross-fitted CatBoost and LR) is reported as a '
+                    'secondary comparison; there is no per-mask Teacher selection',
+    'variants': ['CatBoost→LR (primary)', 'TabPFN→LR (primary)', 'Ensemble→LR (secondary)',
+                 'CatBoost→XGBoost (sensitivity)', 'TabPFN→XGBoost (sensitivity)'],
+    'not_on_test': 'the v1 task, A1–A3 ablations, improved_v2, the threshold rule, probability calibration and the '
+                   'synthetic checks',
+    'references': 'Fully labeled LR and XGBoost; each Teacher\'s own Test score (teacher_test in every audit)',
+    'disclosure': 'validation was used as a development set; the v2 task (classes, features, Ensemble) was chosen after '
+                  'viewing v1 validation results; under MAR the TabPFN Teacher is unweighted (no sample weights) while '
+                  'the Students keep IPW',
+    'models': 'identical to the validation runs (fits never see the evaluation split); only the scored split changes',
+}
+FROZEN = FROZEN_V1 if common.VERSION == 'v1' else FROZEN_V2
+VARIANTS = ([('CatBoost', 'LR'), ('LR', 'LR'), ('CatBoost', 'XGBoost')] if common.VERSION == 'v1' else
+            [('CatBoost', 'LR'), ('TabPFN', 'LR'), ('Ensemble', 'LR'), ('CatBoost', 'XGBoost'), ('TabPFN', 'XGBoost')])
 
 
 def variant_config(teacher, student):
@@ -55,8 +82,13 @@ def variant_config(teacher, student):
 def validation_audits():
     """Stored validation-run audits, used only to prove the Test run refits the same models."""
     audits = {}
-    for path, query in [(DB_PATH, "SELECT 'main',mechanism,budget,seed,audit FROM cases WHERE status='complete'"),
-                        (STUDY_DB, "SELECT variant,mechanism,budget,seed,audit FROM cases WHERE status='complete'")]:
+    sources = [(DB_PATH, "SELECT 'main',mechanism,budget,seed,audit FROM cases WHERE status='complete'")]
+    if common.VERSION == 'v1':
+        sources.append((STUDY_DB, "SELECT variant,mechanism,budget,seed,audit FROM cases WHERE status='complete'"))
+    else:  # v2: the full-Teacher studies (Ensemble, TabPFN) hold the non-CatBoost validation runs
+        sources += [(full_db(t), f"SELECT '{t}',mechanism,budget,seed,audit FROM cases WHERE status='complete'")
+                    for t in FULL_TEACHERS]
+    for path, query in sources:
         db = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
         try:
             for v, m, b, s, a in db.execute(query):
@@ -67,7 +99,12 @@ def validation_audits():
 
 
 def expected(audits, teacher, student, key):
-    audit = audits[('main', *key)] if teacher == 'CatBoost' else audits[(variant_name(teacher, student, 'labeled'), *key)]
+    if teacher == 'CatBoost':
+        audit = audits[('main', *key)]
+    elif common.VERSION == 'v1':
+        audit = audits[(variant_name(teacher, student, 'labeled'), *key)]
+    else:
+        audit = audits[(teacher, *key)]
     return audit['teacher_oof'], audit['students'][student]['selected'], audit['students'][student]['ppi_selected_lambda']
 
 

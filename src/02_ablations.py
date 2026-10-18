@@ -11,6 +11,7 @@ import sqlite3
 import time
 from dataclasses import replace
 from itertools import product
+from unittest.mock import patch
 
 import numpy as np
 from joblib import Parallel, delayed, parallel_config
@@ -359,6 +360,66 @@ def run_a3(workers=2):
               lambda db, key: (stored_row(metrics, key, 'XGBoost / Supervised'),), workers)
 
 
+# Step 7: A4 — Fully Labeled 2 × 2 (Classes × Features): Which v2 Change Raises the Ceiling?
+
+A4_CELLS = [(4, 7), (4, 12), (3, 7), (3, 12)]  # (classes, features); (4, 7) is the v1 task and (3, 12) the v2 task
+V1_REFERENCE_DB = common.PROJECT_ROOT / 'results' / 'databases' / 'experiments.sqlite'
+
+
+def stored_reference(path):
+    db = sqlite3.connect(f'file:{path}?mode=ro', uri=True)
+    try:
+        return json.loads(db.execute('SELECT value FROM reference').fetchone()[0])
+    finally:
+        db.close()
+
+
+def task_reference(classes, features, config=DEFAULT):
+    """Fully labeled LR and XGBoost on validation for one (classes, features) cell, using the project's own
+    preprocessing and Student fits with the class count and categorical list swapped in. Validation only."""
+    raw = common.read_data().set_index('Incident_ID')
+    if common.CONTEXTUAL_FEATURES[0] not in raw:
+        raw = raw.join(common.contextual_features(raw))
+    split = common.read_split()
+    names = common.RAW_CLASSES if classes == 4 else ['written off', 'substantial', 'minor']
+    def labels(ids):
+        values = raw.loc[ids, common.TARGET]
+        values = values if classes == 4 else values.map(common.CLASS_MAP)
+        return values.map({label: i for i, label in enumerate(names)}).to_numpy(dtype=int)
+    cats = ['Aircraft_Model', 'Aircraft_Nature', 'Aircraft_Phase'] + (common.CONTEXTUAL_FEATURES if features == 12 else [])
+    train, valid = [split.loc[split['split'] == s, 'Incident_ID'] for s in ('train', 'validation')]
+    X, V = raw.loc[train, common.NUMERIC_FEATURES+cats], raw.loc[valid, common.NUMERIC_FEATURES+cats]
+    y, vy = labels(train), labels(valid)
+    result = {}
+    with patch.object(common, 'CATEGORICAL_FEATURES', cats), patch.object(methods, 'K', classes), \
+            threadpool_limits(limits=1):
+        XL, XU, XV = prepare_design(X, X.iloc[:0], V, config)
+        for name in config.student_models:
+            fitted, _ = fit_student(XL, y, XU, np.eye(classes)[y], np.zeros((0, classes)),
+                                    config=replace(config, student_model=name))
+            values = score(probabilities(XV, fitted), vy)
+            result[name] = {key: values[key] for key in ['macro_f1', 'balanced_accuracy', 'accuracy', 'log_loss', 'class_f1']}
+    return result
+
+
+def run_a4():
+    """v2 only: the corner cells must reproduce the stored v1 and v2 fully labeled references exactly."""
+    if common.VERSION != 'v2':
+        print('A4 runs under PPI_VERSION=v2 only.', flush=True)
+        return
+    cells = {f'{c} classes / {f} features': task_reference(c, f) for c, f in A4_CELLS}
+    for cell, path in [('4 classes / 7 features', V1_REFERENCE_DB), ('3 classes / 12 features', DB_PATH)]:
+        stored = stored_reference(path)
+        for name in DEFAULT.student_models:
+            require_equal(f'A4 {cell} {name}', cells[cell][name], stored[name])
+    with connect(ABLATION_DB) as db:
+        set_metadata(db, 'a4_task_reference', {'cells': cells, 'replay': 'v1 and v2 corner cells exact',
+                                               'note': 'Macro F1 averages over a different number of classes in the '
+                                                       '4- and 3-class rows; compare features within a row'})
+    for cell, values in cells.items():
+        print(f"A4 {cell}: " + ' | '.join(f"{n} Macro F1 {v['macro_f1']:.4f}" for n, v in values.items()), flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description='A1 Teacher replay/Teacher-only/fixed λ=1, A2 rounds and A3 capacity ablations.')
     parser.add_argument('--workers', type=int, choices=[1, 2], default=2)
@@ -367,6 +428,7 @@ def main():
     run_ablations(DEFAULT.budgets, DEFAULT.mechanisms, DEFAULT.seeds, args.workers, args.fresh)
     run_a2(args.workers)
     run_a3(args.workers)
+    run_a4()
 
 
 if __name__ == '__main__':

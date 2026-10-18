@@ -363,10 +363,13 @@ def ppi_gains(rows, split='validation', name='ppi_gains.png', extra=None):
     fixed = None if extra is None else extra.loc[extra.method.str.endswith('/ PPI fixed λ=1') & ~extra.method.str.contains(r'\[')]
     if fixed is not None:
         fixed = fixed.assign(student=fixed.method.str.split(' / ').str[0]).set_index(['student', 'mechanism', 'budget', 'seed']).macro_f1
-    found, _, scope = tabpfn_results()
-    tabpfn = pd.DataFrame() if found.empty else found.pivot_table(index=['student', 'mechanism', 'budget', 'seed'],
-                                                                  columns='method', values='macro_f1')
-    tag = '' if scope == 'full' else ', pilot'
+    if 'TabPFN' in wide.index.get_level_values('teacher'):  # rows already include TabPFN (the v2 Test run)
+        tabpfn, tag = wide.xs('TabPFN', level='teacher'), ''
+    else:
+        found, _, scope = tabpfn_results()
+        tabpfn = pd.DataFrame() if found.empty else found.pivot_table(index=['student', 'mechanism', 'budget', 'seed'],
+                                                                      columns='method', values='macro_f1')
+        tag = '' if scope == 'full' else ', pilot'
     fig, axes = six_panel([f'{s} Student\nMacro F1 − Supervised' for s in DEFAULT.student_models])
     for row, student in enumerate(DEFAULT.student_models):
         catboost = wide.loc[('CatBoost', student)]
@@ -383,7 +386,7 @@ def ppi_gains(rows, split='validation', name='ppi_gains.png', extra=None):
             if fixed is not None:  # A1: CatBoost Teacher with λ fixed at 1 instead of chosen by training CV.
                 f = fixed.loc[(student, mechanism)]
                 band(ax, f-c.Supervised, 'PPI, λ fixed at 1 (CatBoost Teacher, A1)', AQUA, 'D', '-.')
-            if split == 'validation' and not tabpfn.empty and (student, mechanism) in tabpfn.index.droplevel([2, 3]):
+            if (split == 'validation' or tag == '') and not tabpfn.empty and (student, mechanism) in tabpfn.index.droplevel([2, 3]):
                 t = tabpfn.loc[(student, mechanism)]
                 band(ax, t['SSL soft']-t.Supervised, f'SSL soft (TabPFN-3.5 Teacher{tag})', ORANGE, 'X', ':')
                 band(ax, t['PPI selected']-t.Supervised, f'PPI (TabPFN-3.5 Teacher{tag})', AQUA, 'X', ':')
@@ -530,11 +533,17 @@ def final_test_outputs():
     FROZEN, load_test = _module.FROZEN, _module.load
     test, reference = load_test()
     ppi_gains(test, 'TEST', 'test_gains.png')
-    validation, _ = load_teacher_study()
+    if common.VERSION == 'v1':
+        validation, _ = load_teacher_study()
+        validation = validation.loc[validation.design == 'labeled']
+    else:  # v2: CatBoost from the main study, Ensemble and TabPFN from the full-Teacher studies
+        main_rows = load_main()[0]
+        validation = pd.concat([main_rows.assign(teacher='CatBoost', method=main_rows.training_method)]+[
+            full_teacher_results(t)[0].assign(teacher=t) for t in _teacher_study.FULL_TEACHERS])
     print('\n=== Final Test evaluation (frozen protocol, run once) ===')
     print(f"Final method: {FROZEN['final_method']}")
     print(f"Fully labeled Test Macro F1: LR {reference['LR']['macro_f1']:.4f} | XGBoost {reference['XGBoost']['macro_f1']:.4f}")
-    for split, rows in [('validation', validation.loc[validation.design == 'labeled']), ('TEST', test)]:
+    for split, rows in [('validation', validation), ('TEST', test)]:
         wide = rows.pivot_table(index=['teacher', 'student', 'mechanism', 'budget', 'seed'], columns='method', values='macro_f1')
         print(f'\n{split}: paired differences over 75 masks')
         for (teacher, student), w in wide.groupby(level=['teacher', 'student']):
@@ -971,6 +980,25 @@ def teacher_quality_v2(main, audits):
     finish(fig, axes, 'Teacher and Supervised Student Performance', 'teacher_quality.png')
 
 
+def task_reference_table():
+    # A4: fully labeled 2 × 2 (classes × features), validation only; read from the v2 ablations database.
+    db = read_only(ABLATION_DB)
+    try:
+        row = db.execute("SELECT value FROM metadata WHERE key='a4_task_reference'").fetchone()
+    finally:
+        db.close()
+    if row is None:
+        print('A4 (fully labeled 2 × 2) not run yet; no table written.', flush=True)
+        return
+    cells = json.loads(row[0])['cells']
+    table = pd.DataFrame([dict(classes=int(cell.split()[0]), features=int(cell.split()[3]), student=name,
+                               **{k: v for k, v in values.items() if k != 'class_f1'})
+                          for cell, students in cells.items() for name, values in students.items()])
+    table.round(5).to_csv(RESULTS_DIR/'tables'/'task_reference.csv', index=False)
+    print(f"Saved: {(RESULTS_DIR/'tables'/'task_reference.csv').relative_to(common.PROJECT_ROOT)}")
+    print(table.pivot_table(index=['student', 'classes'], columns='features', values='macro_f1').round(4).to_string())
+
+
 def parsing_check_table():
     report = common.contextual_parsing_report(common.read_data())
     folder = RESULTS_DIR/'tables'
@@ -990,6 +1018,7 @@ def main_v2():
         ppi_gains(main_rows.assign(teacher='CatBoost', method=main_rows.training_method), extra=extra)
         xgboost_sensitivity(main_rows, extra, a2, a3_reference)
     improved_outputs()  # Draws only when every declared case is complete; otherwise reports progress.
+    task_reference_table()
     parsing_check_table()
     tabpfn_summary()
 
