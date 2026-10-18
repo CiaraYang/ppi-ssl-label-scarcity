@@ -4,7 +4,7 @@
 
 This project investigates whether prediction-powered semi-supervised learning improves aircraft damage classification when training labels are scarce. Using the [Global Aviation Incident and Accident Dataset](https://www.kaggle.com/datasets/tejal5kunjir/global-aviation-incident-and-accident-dataset) from Kaggle, it compares supervised learning, soft pseudo-label SSL, and PPI-inspired rectified training under MCAR, MAR, and MNAR label missingness.
 
-The current task classifies aircraft damage into three categories: written off, substantial, and minor. It uses 12 aircraft, incident, and route-related features. CatBoost and pretrained TabPFN-3.5 provide Teacher predictions. Logistic Regression is the primary Student, while XGBoost is used for sensitivity analysis.
+The current task classifies aircraft damage into three categories: written off, substantial, and minor. It uses 12 aircraft, incident, and route-related features. CatBoost, pretrained TabPFN-3.5 and Ensemble provide Teacher predictions. Logistic Regression is the primary Student, while XGBoost is used for sensitivity analysis.
 
 Experiments examine how label availability and Teacher quality affect classification performance. The original four-class, seven-feature experiments are retained as the earlier development version.
 
@@ -65,7 +65,7 @@ The SSL weight and PPI λ are selected by training-only cross-validation using M
 
 ### Results
 
-Metrics include Macro F1, per-class F1, Accuracy, Balanced Accuracy, and Log Loss. Some experiments are still in progress.
+Metrics include Macro F1, per-class F1, Accuracy, Balanced Accuracy, and Log Loss.
 
 | Figures | Comparison |
 |---|---|
