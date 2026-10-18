@@ -588,6 +588,64 @@ class ImprovedTests(unittest.TestCase):
             self.assertLess(audit['ppi_cv_backoff'][student]['effective'], .75)
 
 
+class V2SettingTests(unittest.TestCase):
+    def test_airport_parsing_accepts_only_verified_countries(self):
+        self.assertEqual(data.airport_country('Singapore-Kallang Airport , Singapore'), 'singapore')
+        self.assertEqual(data.airport_country('Manchester-Boston Regional Airport, NH (MHT/KMHT)'), 'united states of america')
+        self.assertEqual(data.airport_country('Sydney Airport, NSW (SYD/YSSY)'), 'australia')
+        self.assertEqual(data.airport_country('Perth Airport, WA (PER/YPPH)'), 'australia')          # WA + Y... = Australia
+        self.assertEqual(data.airport_country('Seattle-Tacoma Airport, WA (SEA/KSEA)'), 'united states of america')
+        self.assertEqual(data.airport_country('Nigeria'), 'nigeria')                                 # no comma, whole string
+        self.assertEqual(data.airport_country('Some field, USA'), 'united states of america')         # alias
+        self.assertTrue(pd.isna(data.airport_country('Southampton Airport (SOU/EGHI), Hampshire')))   # a county is not a country
+        self.assertEqual(data.airport_region('Southampton Airport (SOU/EGHI), Hampshire'), 'Europe')   # ... ICAO prefix instead
+        self.assertTrue(pd.isna(data.airport_region('Aeroclub Allen')))                              # nothing verifiable: missing
+        self.assertTrue(pd.isna(data.airport_region(np.nan)))
+
+    def test_registration_prefix_and_route_flags(self):
+        self.assertEqual(data.registration_prefix('F-GBRS'), 'F')
+        self.assertEqual(data.registration_prefix('N123AB'), 'N')
+        self.assertEqual(data.registration_prefix('44-77320'), 'numeric serial')
+        self.assertTrue(pd.isna(data.registration_prefix(np.nan)))
+        rows = pd.DataFrame({'Aircraft_Registration': ['F-GBRS', np.nan, 'N1'],
+                             'Departure_Airport': ['A (AAA/LFPG), France', 'B (BBB/KJFK), NY (BBB/KJFK)', np.nan],
+                             'Destination_Airport': ['C (CCC/EGLL), United Kingdom', 'B (BBB/KJFK), NY (BBB/KJFK)', 'X']})
+        out = data.contextual_features(rows)
+        self.assertEqual(out.Domestic_Route.tolist(), ['no', 'yes', 'unknown'])
+        self.assertEqual(out.Same_Airport.tolist(), ['no', 'yes', 'no'])
+        self.assertEqual(out.Has_Route.tolist(), ['yes', 'yes', 'no'])
+
+    def test_contextual_features_never_read_labels_or_excluded_columns(self):
+        raw = data.read_data().head(300)
+        changed = raw.assign(**{data.TARGET: 'minor', 'Fatalities': 999, 'Incident_Category': 'x', 'Incident_Causes': 'y'})
+        pd.testing.assert_frame_equal(data.contextual_features(raw), data.contextual_features(changed))
+
+    def test_three_class_map_merges_only_written_off(self):
+        self.assertEqual(data.CLASS_MAP['destroyed'], data.CLASS_MAP['damaged beyond repair'])
+        self.assertEqual(len(set(data.CLASS_MAP.values())), 3)
+        self.assertEqual(data.VERSION, 'v1')        # the default task is unchanged
+        self.assertEqual(len(data.CLASSES), 4)
+        self.assertEqual(len(data.FEATURES), 7)
+
+    def test_ensemble_teacher_is_the_mean_of_catboost_and_lr_on_the_same_rows(self):
+        case = data.load_case(masking.generate_mask(100, 42, 'MCAR'))
+        seen = []
+        def member(value):
+            def fit(X, y, wl, U, seed=42, config=DEFAULT):
+                seen.append((config.teacher_model, tuple(X.index)))
+                return lambda table: np.full((len(table), core.K), value)
+            return fit
+        original = core.fold_teacher
+        calls = {'CatBoost': member(.1), 'LR': member(.4)}
+        def routed(X, y, wl, U, seed=42, config=DEFAULT):
+            return original(X, y, wl, U, seed, config) if config.teacher_model == 'Ensemble' else calls[config.teacher_model](X, y, wl, U, seed, config)
+        with patch.object(core, 'fold_teacher', side_effect=routed):
+            predict = core.fold_teacher(case.X, case.y, case.labeled_weights, case.U, 42, replace(FAST, teacher_model='Ensemble'))
+        np.testing.assert_allclose(predict(case.U.iloc[:3]), .25)
+        self.assertEqual({m for m, _ in seen}, {'CatBoost', 'LR'})
+        self.assertEqual(seen[0][1], seen[1][1])      # both members fitted on exactly the same fold rows
+
+
 class VersionProtectionTests(unittest.TestCase):
     def test_fingerprint_differences_name_what_changed(self):
         old = json.loads(storage.dumps(storage.fingerprint()))

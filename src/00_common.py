@@ -1,5 +1,7 @@
 # Shared: Configuration, Data and Split, Label Masks, Result Storage (Imported by Every Step)
 
+import os
+import re
 import sys
 from pathlib import Path
 
@@ -53,8 +55,8 @@ class Config:
             raise ValueError('Supported Students are LR and XGBoost.')
         if self.student_C <= 0 or self.cv_folds < 2:
             raise ValueError('Use a positive C and at least two CV folds.')
-        if self.teacher_model not in {'CatBoost', 'LR', 'XGBoost', 'TabPFN'}:
-            raise ValueError('Supported Teachers are CatBoost, LR, XGBoost and the pretrained TabPFN.')
+        if self.teacher_model not in {'CatBoost', 'LR', 'XGBoost', 'TabPFN', 'Ensemble'}:
+            raise ValueError('Supported Teachers are CatBoost, LR, XGBoost, the pretrained TabPFN and the CatBoost+LR Ensemble.')
         if self.design_fit not in {'labeled', 'labeled+unlabeled'}:
             raise ValueError('Fit preprocessing on labeled features, or on labeled plus unlabeled features.')
         if not 0 < self.selection_ratio < 1:
@@ -72,14 +74,24 @@ DEFAULT = Config()
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_PATH = PROJECT_ROOT / 'data/Aircraft_Incident_Dataset_Kaggle.csv'
 DATA_DIR = PROJECT_ROOT / 'data'
-RESULTS_DIR = PROJECT_ROOT / 'results'         # figures and CSV tables
+# Task version: v1 = the original task (4 classes, 7 features); v2 = 3 classes + contextual features.
+# Select with the environment variable PPI_VERSION=v2; v1 stays the default, and v2 writes only under results/v2/.
+VERSION = os.environ.get('PPI_VERSION', 'v1')
+if VERSION not in {'v1', 'v2'}:
+    raise ValueError('PPI_VERSION must be v1 or v2.')
+RESULTS_DIR = PROJECT_ROOT / 'results' / ('' if VERSION == 'v1' else VERSION)   # figures and CSV tables
 DATABASE_DIR = RESULTS_DIR / 'databases'       # every study's SQLite database
-SPLIT_PATH = DATA_DIR / 'split_manifest.csv'
+SPLIT_PATH = DATA_DIR / 'split_manifest.csv'   # the same Train / Validation / Test IDs in every version
 DB_PATH = DATABASE_DIR / 'experiments.sqlite'
 TARGET = 'Aircraft_Damage_Type'
-CLASSES = ['damaged beyond repair', 'destroyed', 'minor', 'substantial']
+RAW_CLASSES = ['damaged beyond repair', 'destroyed', 'minor', 'substantial']
+# v2 merges the two written-off outcomes (an aircraft destroyed or damaged beyond repair is a hull loss).
+CLASS_MAP = {'damaged beyond repair': 'written off', 'destroyed': 'written off', 'substantial': 'substantial', 'minor': 'minor'}
+CLASSES = RAW_CLASSES if VERSION == 'v1' else ['written off', 'substantial', 'minor']
 NUMERIC_FEATURES = ['Incident_Year', 'Incident_Month', 'Aircraft_Age', 'Onboard_Total']
-CATEGORICAL_FEATURES = ['Aircraft_Model', 'Aircraft_Nature', 'Aircraft_Phase']
+# Contextual features (v2): parsed from the record by fixed, label-free rules; not all are strictly pre-incident.
+CONTEXTUAL_FEATURES = ['Registration_Prefix', 'Departure_Region', 'Has_Route', 'Same_Airport', 'Domestic_Route']
+CATEGORICAL_FEATURES = ['Aircraft_Model', 'Aircraft_Nature', 'Aircraft_Phase'] + (CONTEXTUAL_FEATURES if VERSION == 'v2' else [])
 FEATURES = NUMERIC_FEATURES + CATEGORICAL_FEATURES
 RANDOM_STATE = 42
 PROTOCOL = DEFAULT.protocol
@@ -96,9 +108,11 @@ def read_data():
         df[col] = pd.to_numeric(df[col], errors='coerce').astype(float)
     df['Aircraft_Age'] = df.Incident_Year - df.Aircraft_First_Flight
     df.loc[~df.Aircraft_Age.between(0, 100), 'Aircraft_Age'] = np.nan
-    for col in CATEGORICAL_FEATURES:
+    for col in ['Aircraft_Model', 'Aircraft_Nature', 'Aircraft_Phase']:
         value = df[col].astype('string').str.strip().replace('', pd.NA)
         df[col] = value.astype(object).where(value.notna(), np.nan)
+    if VERSION == 'v2':
+        df = df.join(contextual_features(df))
     return df
 
 
@@ -119,8 +133,10 @@ def training_features():
 
 
 def encode_target(values):
-    if not values.isin(CLASSES).all():
+    if not values.isin(RAW_CLASSES).all():
         raise ValueError('Unexpected visible target value.')
+    if VERSION == 'v2':
+        values = values.map(CLASS_MAP)
     return values.map({label: i for i, label in enumerate(CLASSES)}).to_numpy(dtype=int)
 
 
@@ -205,6 +221,161 @@ def prepare_catboost_features(X):
     return X
 
 
+# ===== Contextual Features (v2): Validated Parsing With Fixed, Label-Free Row-Wise Rules =====
+
+REGIONS = {
+    'North America': ['united states of america', 'canada', 'greenland', 'bermuda'],
+    'Latin America': ['mexico', 'brazil', 'colombia', 'argentina', 'venezuela', 'bolivia', 'peru', 'chile', 'ecuador', 'cuba',
+                      'guatemala', 'honduras', 'nicaragua', 'panama', 'costa rica', 'el salvador', 'paraguay', 'uruguay',
+                      'haiti', 'dominican republic', 'jamaica', 'bahamas', 'belize', 'guyana', 'suriname', 'puerto rico',
+                      'trinidad and tobago', 'french guiana', 'guadeloupe', 'martinique', 'barbados', 'u.s. virgin islands',
+                      'british virgin islands', 'turks and caicos islands', 'curaçao', 'sint maarten', 'saint lucia',
+                      'antigua and barbuda', 'st. kitts and nevis', 'grenada', 'dominica', 'aruba', 'cayman islands',
+                      'saint vincent and the grenadines', 'montserrat', 'anguilla', 'falkland islands'],
+    'Europe': ['united kingdom', 'france', 'germany', 'italy', 'spain', 'norway', 'greece', 'portugal', 'netherlands',
+               'switzerland', 'belgium', 'sweden', 'denmark', 'finland', 'austria', 'ireland', 'poland', 'czech republic',
+               'czechia', 'iceland', 'hungary', 'romania', 'bulgaria', 'yugoslavia', 'serbia', 'croatia', 'slovakia',
+               'slovenia', 'luxembourg', 'malta', 'cyprus', 'estonia', 'latvia', 'lithuania', 'albania',
+               'bosnia and herzegovina', 'north macedonia', 'montenegro', 'monaco', 'czechoslovakia', 'gibraltar',
+               'faroe islands', 'liechtenstein', 'andorra', 'san marino', 'kosovo', 'isle of man', 'jersey', 'guernsey'],
+    'Russia & former USSR': ['russia', 'ukraine', 'kazakhstan', 'uzbekistan', 'belarus', 'georgia', 'armenia', 'azerbaijan',
+                             'kyrgyzstan', 'tajikistan', 'turkmenistan', 'moldova', 'u.s.s.r.', 'ussr', 'soviet union'],
+    'Asia': ['india', 'indonesia', 'china', 'japan', 'vietnam', 'philippines', 'thailand', 'myanmar', 'taiwan', 'malaysia',
+             'bangladesh', 'nepal', 'pakistan', 'south korea', 'north korea', 'laos', 'cambodia', 'sri lanka', 'singapore',
+             'mongolia', 'hong kong', 'afghanistan', 'bhutan', 'brunei', 'timor-leste', 'east timor', 'macau', 'maldives'],
+    'Middle East': ['turkey', 'iran', 'iraq', 'saudi arabia', 'israel', 'syria', 'lebanon', 'jordan', 'yemen', 'oman',
+                    'united arab emirates', 'kuwait', 'qatar', 'bahrain', 'palestine'],
+    'Africa': ['democratic republic of the congo', 'angola', 'nigeria', 'south africa', 'sudan', 'kenya', 'algeria', 'egypt',
+               'south sudan', 'ethiopia', 'libya', 'morocco', 'tanzania', 'uganda', 'somalia', 'chad', 'cameroon', 'zambia',
+               'zimbabwe', 'mozambique', 'ghana', 'senegal', 'mali', 'niger', 'tunisia', 'madagascar', 'gabon', 'congo',
+               'republic of the congo', 'ivory coast', "côte d'ivoire", 'namibia', 'botswana', 'liberia', 'sierra leone',
+               'guinea', 'burkina faso', 'central african republic', 'rwanda', 'burundi', 'mauritania', 'benin', 'togo',
+               'malawi', 'eritrea', 'djibouti', 'equatorial guinea', 'guinea-bissau', 'lesotho', 'eswatini', 'swaziland',
+               'são tomé and príncipe', 'cape verde', 'comoros', 'gambia', 'st. helena', 'mauritius', 'seychelles',
+               'western sahara', 'réunion', 'mayotte'],
+    'Oceania': ['australia', 'papua new guinea', 'new zealand', 'fiji', 'solomon islands', 'vanuatu', 'new caledonia',
+                'french polynesia', 'guam', 'samoa', 'tonga', 'marshall islands', 'micronesia', 'kiribati', 'american samoa',
+                'u.s. minor outlying islands', 'northern mariana islands', 'palau', 'nauru', 'tuvalu', 'cook islands',
+                'wallis and futuna', 'norfolk island'],
+    'Other': ['antarctica'],
+}
+COUNTRY_REGION = {country: region for region, countries in REGIONS.items() for country in countries}
+COUNTRY_ALIASES = {'usa': 'united states of america', 'u.s.a.': 'united states of america', 'united states': 'united states of america',
+                   "cote d'ivoire": "côte d'ivoire", 'uk': 'united kingdom', 'great britain': 'united kingdom',
+                   'curacao': 'curaçao', 'sao tome and principe': 'são tomé and príncipe', 'russian federation': 'russia'}
+US_STATES = set('AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK '
+                'OR PA RI SC SD TN TX UT VT VA WA WV WI WY DC'.split())
+AU_STATES = {'NSW', 'QLD', 'VIC', 'SA', 'WA', 'TAS', 'NT', 'ACT'}
+ICAO = re.compile(r'\((?:[A-Z0-9]{3}/)?([A-Z]{4})\)')
+
+
+def icao_region(code):
+    """Region from the ICAO airport code's standard regional prefix (first one or two letters)."""
+    if code[:2] in {'LL', 'LT'}:
+        return 'Middle East'
+    if code[:2] in {'OA', 'OP'}:
+        return 'Asia'
+    if code[:2] in {'PA', 'PH', 'PF', 'PO', 'PP'}:
+        return 'North America'
+    return {'K': 'North America', 'C': 'North America', 'M': 'Latin America', 'T': 'Latin America', 'S': 'Latin America',
+            'E': 'Europe', 'L': 'Europe', 'B': 'Europe', 'U': 'Russia & former USSR', 'O': 'Middle East', 'V': 'Asia',
+            'W': 'Asia', 'Z': 'Asia', 'R': 'Asia', 'Y': 'Oceania', 'N': 'Oceania', 'A': 'Oceania', 'P': 'Oceania',
+            'D': 'Africa', 'F': 'Africa', 'G': 'Africa', 'H': 'Africa'}.get(code[0], np.nan)
+
+
+def airport_country(text):
+    """Country only when the tail (or the whole string) is a verified country name, alias or state code; else NaN."""
+    if not isinstance(text, str) or not text.strip():
+        return np.nan
+    tail = text.rsplit(',', 1)[1].strip() if ',' in text else text.strip()
+    name = COUNTRY_ALIASES.get(tail.lower(), tail.lower())
+    if name in COUNTRY_REGION:
+        return name
+    code = re.match(r'^([A-Z]{2,3})(?:\s*\(|$)', tail)
+    if code:
+        icao = ICAO.search(text)
+        first = icao.group(1)[0] if icao else None
+        if code.group(1) in US_STATES and (code.group(1) not in AU_STATES or first == 'K'):
+            return 'united states of america'
+        if code.group(1) in AU_STATES and (code.group(1) not in US_STATES or first == 'Y'):
+            return 'australia'
+    return np.nan
+
+
+def airport_region(text):
+    """Verified country → region; otherwise the ICAO regional prefix; otherwise NaN (never a guess)."""
+    country = airport_country(text)
+    if isinstance(country, str):
+        return COUNTRY_REGION[country]
+    icao = ICAO.search(text) if isinstance(text, str) else None
+    return icao_region(icao.group(1)) if icao else np.nan
+
+
+def registration_prefix(registration):
+    """Nationality prefix of the registration (country of registry); all-digit serials are military-style."""
+    if not isinstance(registration, str) or not registration.strip():
+        return np.nan
+    registration = registration.strip().upper()
+    if re.fullmatch(r'[\d\-/ ]+', registration):
+        return 'numeric serial'
+    if re.match(r'N\d', registration):
+        return 'N'
+    return registration.split('-')[0][:4] if '-' in registration else registration[:2]
+
+
+def contextual_features(df):
+    departure, destination = df.Departure_Airport, df.Destination_Airport
+    has_route = departure.notna() & destination.notna()
+    dep_country, dest_country = departure.map(airport_country), destination.map(airport_country)
+    both = dep_country.notna() & dest_country.notna() & has_route
+    out = pd.DataFrame(index=df.index)
+    out['Registration_Prefix'] = df.Aircraft_Registration.map(registration_prefix)
+    out['Departure_Region'] = departure.map(airport_region)
+    out['Has_Route'] = np.where(has_route, 'yes', 'no')
+    out['Same_Airport'] = np.where(has_route & (departure == destination), 'yes', 'no')
+    out['Domestic_Route'] = np.where(~both, 'unknown', np.where(dep_country == dest_country, 'yes', 'no'))
+    return out.astype(object).where(out.notna(), np.nan)
+
+
+def contextual_parsing_report(df):
+    """Validation of the airport parsing: coverage of each source and agreement where both sources exist."""
+    airports = pd.concat([df.Departure_Airport, df.Destination_Airport]).dropna()
+    by_country = airports.map(lambda t: COUNTRY_REGION.get(airport_country(t), np.nan) if isinstance(airport_country(t), str) else np.nan)
+    by_icao = airports.map(lambda t: icao_region(ICAO.search(t).group(1)) if ICAO.search(t) else np.nan)
+    both = by_country.notna() & by_icao.notna()
+    final = airports.map(airport_region)
+    return {'airport strings': int(len(airports)), 'region from verified country': float(by_country.notna().mean()),
+            'region from ICAO only': float((by_country.isna() & by_icao.notna()).mean()),
+            'unparsed (left missing)': float(final.isna().mean()),
+            'rows with both sources': int(both.sum()), 'country-vs-ICAO region agreement': float((by_country[both] == by_icao[both]).mean())}
+
+
+# Stored in every v2 database before its first result; v2 is adopted as the final setting whatever PPI shows.
+V2_DECLARATION = {
+    'name': 'v2_three_classes_contextual_features', 'declared_on': '2026-10-18',
+    'why': 'the v1 fully labeled reference was low (LR Macro F1 0.637). On the training split, merging the two written-off '
+           'outcomes and adding contextual features raised the fully labeled ceiling (validation: LR 0.709 → 0.725, '
+           'CatBoost 0.719 → 0.735, TabPFN 0.746); v1 remains as the development version',
+    'adoption rule': 'v2 replaces v1 as the final setting regardless of how Supervised, SSL or PPI compare',
+    'classes': 'written off (destroyed + damaged beyond repair) / substantial / minor',
+    'contextual features': 'registration prefix; departure region (verified country name or ICAO regional prefix, else '
+                           'missing); has route; same airport; domestic route (unknown unless both countries are verified). '
+                           'Fixed row-wise rules, no labels, nothing fitted outside the training fold; called contextual, '
+                           'not claimed to be strictly pre-incident',
+    'excluded': 'Incident_Category, Incident_Causes, Fatalities and any fatality flag (outcome information)',
+    'missing data': 'never filled with 0; median imputation with missing indicators and an Unknown category, fitted in '
+                    'the training fold',
+    'design': 'same Train / Validation / Test IDs; budgets 50–1,000; seeds 42–46 (75 cases); MCAR and MAR unchanged '
+              '(Students keep IPW); MNAR still under-samples the recorded destroyed outcome, i.e. a subgroup selection '
+              'inside written off; every method in a case uses the same mask',
+    'models': 'primary Teachers CatBoost and TabPFN; secondary Teacher Ensemble (CatBoost + LR, only the Teacher '
+              'changes); primary Student LR; sensitivity Student XGBoost; Supervised / SSL soft / PPI selected with the '
+              'v1 SSL weights, confidence threshold, λ grid, training CV, cross-fitting and nested Teacher fitting',
+    'evaluation': 'primary Macro F1 with argmax decisions; secondary Accuracy, Balanced Accuracy, Log Loss and per-class '
+                  'F1; validation only (development set); Test untouched',
+}
+
+
 # ===== From prepare_data.py — Step 1: Import Libraries =====
 
 # Step 2: Reproduce the Original Stratified Assignment
@@ -214,9 +385,9 @@ def build_split():
     if raw.Incident_ID.isna().any() or not raw.Incident_ID.is_unique:
         raise ValueError('Dataset IDs must be nonmissing and unique.')
     target = raw[TARGET].astype('string').str.strip().str.lower().replace('', pd.NA)
-    if not target.dropna().isin(CLASSES + ['aircraft missing']).all():
+    if not target.dropna().isin(RAW_CLASSES + ['aircraft missing']).all():
         raise ValueError('Unexpected target categories.')
-    eligible = raw.loc[target.isin(CLASSES)].copy()
+    eligible = raw.loc[target.isin(RAW_CLASSES)].copy()
     eligible[TARGET] = target.loc[eligible.index]
     train, temporary = train_test_split(
         eligible, test_size=.3, stratify=eligible[TARGET], random_state=RANDOM_STATE
@@ -320,7 +491,8 @@ def fingerprint(config=DEFAULT):
             'split_sha256': hashlib.sha256(SPLIT_PATH.read_bytes()).hexdigest(),
             'source_sha256': {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in Path(__file__).parent.glob('*.py')},
             'versions': {name: importlib.metadata.version(name) for name in ['numpy', 'pandas', 'scipy', 'scikit-learn', 'catboost', 'xgboost']},
-            'evaluation': 'fixed validation/development set; test performance not evaluated'}
+            'evaluation': 'fixed validation/development set; test performance not evaluated',
+            **({'task_version': VERSION, 'classes': CLASSES, 'features': FEATURES} if VERSION != 'v1' else {})}
 
 
 def fingerprint_differences(old, new):

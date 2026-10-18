@@ -320,19 +320,38 @@ TABPFN_FULL_DECLARATION = {
 }
 
 
-def tabpfn_full_fingerprint():
+FULL_TEACHERS = ['TabPFN'] if common.VERSION == 'v1' else ['Ensemble', 'TabPFN']
+
+
+def full_db(teacher):
+    return RESULTS_DIR / 'databases' / f'{teacher.lower()}_teacher_full.sqlite'
+
+
+def full_declaration(teacher):
+    if common.VERSION == 'v1':
+        return TABPFN_FULL_DECLARATION
+    return {**common.V2_DECLARATION, 'study': f'{teacher} Teacher on the 75 v2 masks; LR and XGBoost Students',
+            **({'teacher': 'TabPFN-3.5, pinned checkpoint, unweighted under MAR (no sample weights)'} if teacher == 'TabPFN' else
+               {'teacher': 'mean of the cross-fitted CatBoost and LR Teachers on the same folds'})}
+
+
+def full_fingerprint(teacher):
     import hashlib
     import importlib.metadata
     from pathlib import Path
     DATA_PATH, SPLIT_PATH = common.DATA_PATH, common.SPLIT_PATH
     core = Path(__file__).parent
     return json.loads(dumps({
-        'config': TABPFN_FULL_CONFIG.to_dict(), 'declaration': TABPFN_FULL_DECLARATION,
+        'config': replace(DEFAULT, teacher_model=teacher).to_dict(), 'declaration': full_declaration(teacher),
         'data_sha256': hashlib.sha256(DATA_PATH.read_bytes()).hexdigest(),
         'split_sha256': hashlib.sha256(SPLIT_PATH.read_bytes()).hexdigest(),
         'source_sha256': {n: hashlib.sha256((core/n).read_bytes()).hexdigest() for n in COMPUTE_SOURCES},
         'versions': {n: importlib.metadata.version(n) for n in
                      ['numpy', 'pandas', 'scipy', 'scikit-learn', 'xgboost', 'tabpfn', 'torch']}}))
+
+
+def tabpfn_full_fingerprint():
+    return full_fingerprint('TabPFN')
 
 
 def read_only_main_supervised_all():
@@ -344,30 +363,32 @@ def read_only_main_supervised_all():
         db.close()
 
 
-def run_tabpfn_full():
-    """Sequential (one Apple-GPU process); each finished case is committed, so an interrupted run resumes."""
-    import torch  # noqa: F401  (PyTorch's OpenMP runtime must load before XGBoost's on macOS)
+def run_teacher_full(teacher):
+    """One Teacher on all 75 main-study masks with both Students; sequential, each finished case is committed."""
+    if teacher == 'TabPFN':
+        import torch  # noqa: F401  (PyTorch's OpenMP runtime must load before XGBoost's on macOS)
     connect_main_schema, save_case, set_metadata, get_metadata = common.connect, common.save_case, common.set_metadata, common.get_metadata
+    config, path = replace(DEFAULT, teacher_model=teacher), full_db(teacher)
     keys = list(product(DEFAULT.mechanisms, DEFAULT.budgets, DEFAULT.seeds))
-    with connect_main_schema(TABPFN_FULL_DB) as db:
+    with connect_main_schema(path) as db:
         done = {tuple(r) for r in db.execute("SELECT mechanism,budget,seed FROM cases WHERE status='complete'")}
         if set(keys) <= done:
-            print('Full TabPFN Teacher study already complete; nothing to run.', flush=True)
+            print(f'Full {teacher} Teacher study already complete; nothing to run.', flush=True)
             return
-        current, previous = tabpfn_full_fingerprint(), get_metadata(db, 'fingerprint')
+        current, previous = full_fingerprint(teacher), get_metadata(db, 'fingerprint')
         if previous is not None and previous != current:
-            raise ValueError('Model code, data or package versions changed since this study started; '
-                             'move tabpfn_teacher_full.sqlite aside to rerun.')
+            raise ValueError(f'Model code, data or package versions changed since this study started; move {path.name} aside to rerun.')
         set_metadata(db, 'fingerprint', current)
-        set_metadata(db, 'declaration', TABPFN_FULL_DECLARATION)
+        set_metadata(db, 'declaration', full_declaration(teacher))
         main = read_only_main_supervised_all()
         tasks = [key for key in keys if key not in done]
-        print(f'{len(tasks)} TabPFN Teacher cases to run sequentially | {len(done)} done', flush=True)
+        print(f'{len(tasks)} {teacher} Teacher cases to run sequentially | {len(done)} done', flush=True)
         for count, key in enumerate(tasks, 1):
             mechanism, budget, seed = key
             try:
-                rows, audit = run_case(budget, mechanism, seed, TABPFN_FULL_CONFIG)
-                audit['tabpfn_refit_validation'] = tabpfn_alone(*key)
+                rows, audit = run_case(budget, mechanism, seed, config)
+                if teacher == 'TabPFN':
+                    audit['tabpfn_refit_validation'] = tabpfn_alone(*key)
                 for row in rows:  # The Supervised Students never see the Teacher: they must equal the main study.
                     if row['method'].endswith('/ Supervised') and row['macro_f1'] != main[(*key, row['method'])]:
                         raise RuntimeError(f"ReplayMismatch: {row['method']} {row['macro_f1']} vs main {main[(*key, row['method'])]}")
@@ -380,13 +401,22 @@ def run_tabpfn_full():
         failed = db.execute("SELECT COUNT(*) FROM cases WHERE status!='complete'").fetchone()[0]
         set_metadata(db, 'status', 'complete_with_failures' if failed else 'complete')
     if failed:
-        raise RuntimeError(f'{failed} TabPFN Teacher cases failed; see {TABPFN_FULL_DB.name}.')
+        raise RuntimeError(f'{failed} {teacher} Teacher cases failed; see {path.name}.')
+
+
+def run_tabpfn_full():
+    run_teacher_full('TabPFN')
 
 
 def main():
     parser = argparse.ArgumentParser(description='Same-architecture Teachers, label-free preprocessing and TabPFN Teachers.')
     parser.add_argument('--workers', type=int, default=8)
-    run_study(parser.parse_args().workers)
+    workers = parser.parse_args().workers
+    if common.VERSION == 'v2':  # v2: the full-Teacher studies only (same-architecture variants and the pilot stay v1)
+        for teacher in FULL_TEACHERS:
+            run_teacher_full(teacher)
+        return
+    run_study(workers)
     run_tabpfn_pilot()
     run_tabpfn_full()
 

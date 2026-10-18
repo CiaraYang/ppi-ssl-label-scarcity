@@ -182,7 +182,7 @@ def save(fig, name):
                     raise ValueError(f'Row label clipped in {name}: {text.get_text()}')
     fig.savefig(path, dpi=180, facecolor='white')
     plt.close(fig)
-    print(f'Saved: results/{relative}', flush=True)
+    print(f'Saved: {(RESULTS_DIR/relative).relative_to(common.PROJECT_ROOT)}', flush=True)
 
 
 def by_case(rows, mechanism, column='macro_f1'):
@@ -197,6 +197,9 @@ def learning_curves(main, reference, audits):
     tabpfn, _, scope = tabpfn_results()
     if scope == 'full':
         groups['TabPFN'] = tabpfn
+    ensemble = full_teacher_results('Ensemble')
+    if ensemble is not None:
+        groups['Ensemble'] = ensemble[0]
     for teacher, rows in groups.items():
         fig, axes = six_panel([f'{s} Student\nValidation Macro F1' for s in DEFAULT.student_models])
         for row, student in enumerate(DEFAULT.student_models):
@@ -304,6 +307,25 @@ def teacher_quality(main, audits, study_audits, extra):
     finish(fig, axes, 'Teacher and Supervised Student Performance', 'teacher_quality.png')
 
 
+def full_teacher_results(teacher):
+    """Rows and audits of a complete full-Teacher study (75 masks, LR and XGBoost), or None if not complete."""
+    path = _teacher_study.full_db(teacher)
+    if not path.exists():
+        return None
+    db = read_only(path)
+    try:
+        done = db.execute("SELECT COUNT(*) FROM cases WHERE status='complete'").fetchone()[0]
+        if done < len(DEFAULT.mechanisms)*len(DEFAULT.budgets)*len(DEFAULT.seeds):
+            return None
+        rows = pd.read_sql_query('SELECT * FROM metrics', db)
+        audits = {(m, b, s): json.loads(a) for m, b, s, a in
+                  db.execute("SELECT mechanism,budget,seed,audit FROM cases WHERE status='complete'")}
+    finally:
+        db.close()
+    rows[['student', 'method']] = rows.method.str.split(' / ', expand=True)
+    return rows, audits
+
+
 def tabpfn_results():
     """TabPFN-Teacher rows (student, mechanism, budget, seed, method, macro_f1, lambda_value) and audits.
     Uses the full study (75 masks, LR and XGBoost) once complete, else the complete MCAR/LR pilot, else nothing."""
@@ -347,14 +369,17 @@ def ppi_gains(rows, split='validation', name='ppi_gains.png', extra=None):
     tag = '' if scope == 'full' else ', pilot'
     fig, axes = six_panel([f'{s} Student\nMacro F1 − Supervised' for s in DEFAULT.student_models])
     for row, student in enumerate(DEFAULT.student_models):
-        catboost, same = wide.loc[('CatBoost', student)], wide.loc[(student, student)]
+        catboost = wide.loc[('CatBoost', student)]
+        same = wide.loc[(student, student)] if (student, student) in wide.index.droplevel([2, 3, 4]) else None  # v1 only
         for column, mechanism in enumerate(MECHANISMS):
             ax = axes[row, column]
             zero_line(ax)
-            c, s = catboost.loc[mechanism], same.loc[mechanism]
+            c = catboost.loc[mechanism]
             band(ax, c['SSL soft']-c.Supervised, 'SSL soft (CatBoost Teacher)', ORANGE, 's')
             band(ax, c['PPI selected']-c.Supervised, 'PPI (CatBoost Teacher)', AQUA, '^')
-            band(ax, s['PPI selected']-s.Supervised, 'PPI (same-architecture Teacher)', AQUA, 'v', '--')
+            if same is not None:
+                s = same.loc[mechanism]
+                band(ax, s['PPI selected']-s.Supervised, 'PPI (same-architecture Teacher)', AQUA, 'v', '--')
             if fixed is not None:  # A1: CatBoost Teacher with λ fixed at 1 instead of chosen by training CV.
                 f = fixed.loc[(student, mechanism)]
                 band(ax, f-c.Supervised, 'PPI, λ fixed at 1 (CatBoost Teacher, A1)', AQUA, 'D', '-.')
@@ -897,5 +922,78 @@ def tabpfn_summary():
             print(f"  {name}: {r['mean']:+.4f} [{r['boot_low']:+.4f}, {r['boot_high']:+.4f}] "
                   f"({r['seeds_positive']}/{r['n_seeds']} seeds positive)")
 
+
+# Step 14: v2 (Three Classes + Contextual Features) — the Same Figures Under results/v2/, Plus Two Tables
+
+def teacher_quality_table():
+    main_rows, _, audits = load_main()
+    supervised = main_rows.loc[main_rows.training_method == 'Supervised'].pivot_table(
+        index='budget', columns='student', values='macro_f1')
+    table = supervised.rename(columns=lambda s: f'Supervised {s} Student')
+    table['CatBoost Teacher (cross-fit)'] = pd.Series({b: np.mean([a['teacher_validation']['macro_f1'] for (_, bb, _), a
+                                                                   in audits.items() if bb == b]) for b in BUDGETS})
+    for teacher in ['Ensemble', 'TabPFN']:
+        found = full_teacher_results(teacher)
+        if found is None:
+            continue
+        _, t_audits = found
+        table[f'{teacher} Teacher (cross-fit)'] = pd.Series({b: np.mean([a['teacher_validation']['macro_f1'] for (_, bb, _), a
+                                                                         in t_audits.items() if bb == b]) for b in BUDGETS})
+        if teacher == 'TabPFN':
+            table['TabPFN alone (visible labels as context)'] = pd.Series(
+                {b: np.mean([a['tabpfn_refit_validation']['macro_f1'] for (_, bb, _), a in t_audits.items() if bb == b])
+                 for b in BUDGETS})
+    folder = RESULTS_DIR/'tables'
+    folder.mkdir(parents=True, exist_ok=True)
+    table.round(5).to_csv(folder/'teacher_quality.csv')
+    print('Saved: results/v2/tables/teacher_quality.csv' if common.VERSION == 'v2' else 'Saved: results/tables/teacher_quality.csv')
+    print(table.round(4).to_string())
+
+
+def teacher_quality_v2(main, audits):
+    # Same figure as v1 teacher_quality, with the v2 Teachers (no same-architecture or refit ablation in v2).
+    teachers = [('CatBoost', audits)] + [(t, found[1]) for t in ['Ensemble', 'TabPFN']
+                                          if (found := full_teacher_results(t)) is not None]
+    scores = {t: pd.DataFrame([dict(mechanism=m, budget=b, seed=s, macro_f1=a['teacher_validation']['macro_f1'],
+                                    alone=a.get('tabpfn_refit_validation', {}).get('macro_f1', np.nan))
+                               for (m, b, s), a in t_audits.items()]) for t, t_audits in teachers}
+    fig, axes = six_panel([f'{s} Student\nValidation Macro F1' for s in DEFAULT.student_models])
+    for row, student in enumerate(DEFAULT.student_models):
+        supervised = main.loc[(main.student == student) & (main.training_method == 'Supervised')]
+        for column, mechanism in enumerate(MECHANISMS):
+            ax = axes[row, column]
+            band(ax, by_case(supervised, mechanism), 'Student trained Supervised', BLUE, 'o')
+            for teacher, marker in zip(scores, ['D', 's', 'X']):
+                band(ax, by_case(scores[teacher], mechanism), f'{teacher} Teacher (cross-fit)', MUTED, marker)
+            if 'TabPFN' in scores:
+                band(ax, by_case(scores['TabPFN'], mechanism, 'alone'), 'TabPFN-3.5 alone (n visible labels as context)',
+                     MUTED, 'P')
+    finish(fig, axes, 'Teacher and Supervised Student Performance', 'teacher_quality.png')
+
+
+def parsing_check_table():
+    report = common.contextual_parsing_report(common.read_data())
+    folder = RESULTS_DIR/'tables'
+    folder.mkdir(parents=True, exist_ok=True)
+    pd.Series(report).to_csv(folder/'contextual_parsing_check.csv', header=['value'])
+    print('Saved: results/v2/tables/contextual_parsing_check.csv')
+    print(pd.Series(report).to_string())
+
+
+def main_v2():
+    main_rows, reference, audits = load_main()
+    learning_curves(main_rows, reference, audits)   # learning curves, gains, per-class F1 and metric changes per Teacher
+    teacher_quality_table()
+    teacher_quality_v2(main_rows, audits)
+    if ABLATION_DB.exists():  # v2 A1–A3 on the v2 main study; the CatBoost Teacher rows come from the main study itself
+        extra, _, a2, a3_reference = load_ablations()
+        ppi_gains(main_rows.assign(teacher='CatBoost', method=main_rows.training_method), extra=extra)
+        xgboost_sensitivity(main_rows, extra, a2, a3_reference)
+    improved_outputs()  # Draws only when every declared case is complete; otherwise reports progress.
+    parsing_check_table()
+    tabpfn_summary()
+
+
 if __name__ == '__main__':
-    main()
+    main_v2() if common.VERSION == 'v2' else main()
+

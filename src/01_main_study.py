@@ -69,6 +69,8 @@ def run_study(budgets, mechanisms, seeds, workers=2, fresh=False, retry_failed=F
             print(f"Fully labeled {name}: Accuracy={result['accuracy']:.4f}, Macro F1={result['macro_f1']:.4f}", flush=True)
         grid = {'budgets': list(budgets), 'mechanisms': list(mechanisms), 'seeds': list(seeds)}
         set_metadata(db, 'grid', grid)
+        if common.VERSION == 'v2':  # Pre-declaration stored before the first v2 result.
+            set_metadata(db, 'declaration', common.V2_DECLARATION)
         set_metadata(db, 'status', 'running')
         tasks = list(product(mechanisms, budgets, seeds))
         existing = {tuple(row[:3]): row[3] for row in db.execute('SELECT mechanism,budget,seed,status FROM cases')}

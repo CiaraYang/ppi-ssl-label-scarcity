@@ -1,0 +1,7 @@
+,value
+airport strings,49837.0
+region from verified country,0.7714148122880591
+region from ICAO only,0.17804041174227983
+unparsed (left missing),0.050544775969661095
+rows with both sources,31939.0
+country-vs-ICAO region agreement,0.9902626882494756

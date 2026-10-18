@@ -158,6 +158,7 @@ def teacher_probabilities(model, table, classes):
 
 
 TABPFN_CHECKPOINT = 'tabpfn-v3.5-20260909.safetensors'  # TabPFN-3.5, pretrained on synthetic tasks only
+TABPFN_BATCH = 4000  # rows per predict call (22,500 rows at once exceeded the 7.5 GB Apple-GPU limit with 12 features)
 
 
 def tabpfn_teacher(X, y, seed=42):
@@ -190,7 +191,9 @@ def tabpfn_teacher(X, y, seed=42):
     def predict(table):
         probability = np.zeros((len(table), K))
         if len(table):
-            probability[:, model.classes_.astype(int)] = model.predict_proba(encode(table))
+            # Batches keep GPU memory bounded; each test row attends only to the context, so batching changes nothing.
+            probability[:, model.classes_.astype(int)] = np.vstack(
+                [model.predict_proba(encode(table.iloc[i:i+TABPFN_BATCH])) for i in range(0, len(table), TABPFN_BATCH)])
             # TabPFN returns float32 rows that can sum to 1 + 1e-7; renormalize so every Teacher row is an exact
             # distribution (otherwise PPI at λ=1 gives a tiny negative row mass that the tree Student rejects).
             probability /= probability.sum(axis=1, keepdims=True)
@@ -199,7 +202,11 @@ def tabpfn_teacher(X, y, seed=42):
 
 
 def fold_teacher(X, y, wl, U, seed=42, config=DEFAULT):
-    """Fit one Teacher on one fold's visible labels; return aligned four-class probabilities for any table."""
+    """Fit one Teacher on one fold's visible labels; return aligned class probabilities for any table."""
+    if config.teacher_model == 'Ensemble':
+        # Mean of the CatBoost and LR Teachers fitted on the same fold rows (as improved_v2; no label-based weighting).
+        members = [fold_teacher(X, y, wl, U, seed, replace(config, teacher_model=name)) for name in ('CatBoost', 'LR')]
+        return lambda table: (members[0](table)+members[1](table))/2
     if config.teacher_model == 'TabPFN':
         return tabpfn_teacher(X, y, seed)
     if config.teacher_model == 'CatBoost':

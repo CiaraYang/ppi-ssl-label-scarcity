@@ -1,0 +1,6 @@
+budget,Supervised LR Student,Supervised XGBoost Student,CatBoost Teacher (cross-fit),Ensemble Teacher (cross-fit),TabPFN Teacher (cross-fit),TabPFN alone (visible labels as context)
+50,0.5092,0.53227,0.49046,0.49197,0.51279,0.5413
+100,0.55238,0.55516,0.51823,0.52911,0.55309,0.57661
+200,0.6071,0.62087,0.54758,0.57731,0.61406,0.63039
+500,0.6581,0.66468,0.63371,0.65465,0.67541,0.68262
+1000,0.68107,0.67866,0.67418,0.68641,0.69341,0.69598

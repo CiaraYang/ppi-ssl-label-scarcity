@@ -65,7 +65,7 @@ The SSL weight and PPI λ are selected by training-only cross-validation using M
 
 ### Results
 
-Metrics include Macro F1, per-class F1, Accuracy, Balanced Accuracy, and Log Loss.
+Metrics include Macro F1, per-class F1, Accuracy, Balanced Accuracy, and Log Loss. Some experiments are still in progress.
 
 | Figures | Comparison |
 |---|---|
@@ -75,8 +75,9 @@ Metrics include Macro F1, per-class F1, Accuracy, Balanced Accuracy, and Log Los
 | [Teacher quality](results/v2/figures/04_teacher_quality/) | Teacher prediction performance |
 | [Ablations](results/v2/figures/05_ablations/) | Correction strength and model settings |
 | [Additional metrics](results/v2/figures/07_metrics/) | Paired differences across evaluation metrics |
+| [Summary tables](results/v2/tables/) | Numerical results |
 
-Masks sharing a seed are nested across label budgets. All experiments share one dataset split, so variation across seeds describes sensitivity to label availability rather than independent dataset replication.
+Real-data comparisons use matched label masks. Masks sharing a seed are nested across label budgets, and all runs use the same dataset split. Variation across seeds reflects sensitivity to label availability.
 
 ### Versions
 
