@@ -171,8 +171,7 @@ def learning_curves(main, reference, audits):
             band(ax, by_case(teacher, mechanism), 'CatBoost Teacher (cross-fit)', TEACHER_GRAY, 'D', ':')
             ax.axhline(reference[student]['macro_f1'], color=INK, linestyle='--', linewidth=1.4,
                        label='Fully labeled Student (same architecture)')
-    finish(fig, axes, 'Validation Macro F1 vs visible labels (mean over 5 masks; MAR uses IPW; '
-           'MNAR is an uncorrected stress test)', 'learning_curves.png')
+    finish(fig, axes, 'Classification Performance under Label Scarcity', 'learning_curves.png')
 
 
 # Step 4: Figure 2 — Are the Teachers Better Than the Student They Teach?
@@ -197,8 +196,7 @@ def teacher_quality(main, audits, study_audits, extra):
                 band(ax, by_case(tabpfn, mechanism), 'TabPFN-3.5 Teacher (pretrained; cross-fit)', MUTED, 'X', '-')
                 band(ax, by_case(tabpfn, mechanism, 'alone'), 'TabPFN-3.5 alone (all visible labels as context)',
                      MUTED, 'P', ':')
-    finish(fig, axes, 'Teacher quality: each Teacher vs the Student trained Supervised '
-           '(validation Macro F1; mean over 5 masks)', 'teacher_quality.png')
+    finish(fig, axes, 'Teacher and Supervised Student Performance', 'teacher_quality.png')
 
 
 def tabpfn_results():
@@ -259,8 +257,7 @@ def ppi_gains(rows, split='validation', name='ppi_gains.png', extra=None):
                 t = tabpfn.loc[(student, mechanism)]
                 band(ax, t['SSL soft']-t.Supervised, f'SSL soft (TabPFN-3.5 Teacher{tag})', ORANGE, 'X', ':')
                 band(ax, t['PPI selected']-t.Supervised, f'PPI (TabPFN-3.5 Teacher{tag})', AQUA, 'X', ':')
-    finish(fig, axes, f'Gain over the same Student trained Supervised on the same mask '
-           f'(above 0 = better; {split} Macro F1; mean over 5 masks)', name)
+    finish(fig, axes, f'Macro F1 Gain over Supervised Learning ({split.capitalize()})', name)
 
 
 # Step 6: Figure 4 — XGBoost Sensitivity on the Pre-Declared Subset (A2 Rounds, A3 Capacity)
@@ -290,8 +287,7 @@ def xgboost_sensitivity(main, extra, a2, a3_reference):
                        label='Fully labeled, main')
         bottom.axhline(a3_reference['large']['macro_f1'], color=MUTED, linewidth=1.4,
                        label='Fully labeled, depth 5')
-    finish(fig, axes, 'XGBoost sensitivity (MCAR and MAR at 100 and 500 labels): boosting rounds for PPI (top)\n'
-           'and Student capacity for Supervised (bottom); mean over 5 masks', 'xgboost_sensitivity.png')
+    finish(fig, axes, 'XGBoost: Boosting Rounds and Model Capacity', 'xgboost_sensitivity.png')
 
 
 # Step 7: Print the Key Numbers (Console Only; Nothing Is Written Besides the Figures)
@@ -397,8 +393,7 @@ def improved_outputs():
                 for method, color, marker, style in [('SSL soft', ORANGE, 's', '-'), ('PPI CV λ', AQUA, '^', '-'),
                                                      ('PPI heuristic λ', AQUA, 'v', '--')]:
                     band(ax, (wide[f'{student} / {method}{rule}']-sup).loc[mechanism], method, color, marker, style)
-        finish(fig, axes, f'Exploratory {PROTOCOL["name"]}: gain over Supervised on the same mask ({label}; Ensemble '
-               f'Teacher; validation; mean over {len(CONFIG.seeds)} masks)', name)
+        finish(fig, axes, 'Ensemble Teacher: Student Performance Gains', name)
 
     print(f'\n=== Exploratory {PROTOCOL["name"]} (validation only; {len(CONFIG.seeds)} seeds) ===')
     for student in STUDENTS:
@@ -630,9 +625,7 @@ def positive_control_outputs():
             zero_line(ax)
             for method in PC_METHODS:
                 band(ax, paired(rows, teacher, f'{method} − Supervised').loc[mechanism], method, *styles[method])
-    finish(fig, axes, 'Synthetic positive control: oracle Teacher (top) and a noisy Teacher weaker than the Student (bottom; noise independent of y)'
-           f'\nLR Student, gain over Supervised on the same mask (mean over {len(declaration["grid"]["seeds"])} '
-           'independent replications)', 'positive_control.png')
+    finish(fig, axes, 'Synthetic Classification: Effect of Teacher Quality', 'positive_control.png')
     table = checks(rows, declaration)
     table.to_csv(RESULTS_DIR/'positive_control_checks.csv', index=False, float_format='%.5f')
     print('Saved: results/positive_control_checks.csv')
@@ -650,7 +643,7 @@ def positive_control_outputs():
 
 def ppssl_outputs():
     _module = import_module('05_synthetic_checks')
-    BOUNDARY, SETUP, check_targets, is_complete, load_ppssl, with_best_fixed = _module.BOUNDARY, _module.SETUP, _module.check_targets, _module.ppssl_complete, _module.load_ppssl, _module.with_best_fixed
+    BOUNDARY, check_targets, is_complete, load_ppssl, with_best_fixed = _module.BOUNDARY, _module.check_targets, _module.ppssl_complete, _module.load_ppssl, _module.with_best_fixed
     if not is_complete():
         print('PP-SSL replication incomplete; no figure drawn.', flush=True)
         return
@@ -660,8 +653,8 @@ def ppssl_outputs():
     styles = [('Only Labeled', BLUE, 'o', '-'), ('Classic SSL', ORANGE, 's', '-'), ('Teacher', TEACHER_GRAY, 'D', ':'),
               ('PPI++ (offline λ)', AQUA, 'v', '--'), ('PP-SSL (online λ)', AQUA, '^', '-'),
               ('PPI, λ by training CV (this project)', AQUA, 'P', ':')]
-    for column, (metric, title) in enumerate([('mse', 'All test rows'), ('mse_a', 'Group A (Teacher = oracle)'),
-                                              ('mse_b', 'Group B (Teacher biased by −μ)')]):
+    for column, (metric, title) in enumerate([('mse', 'Overall'), ('mse_a', 'Group A: Oracle Teacher'),
+                                              ('mse_b', 'Group B: Biased Teacher')]):
         ax = axes[0, column]
         for method, color, marker, style in styles:
             values = mean.loc[method, metric]
@@ -685,10 +678,9 @@ def ppssl_outputs():
         ax.plot(curve.index, curve, color=AQUA, marker='o', linestyle=':', linewidth=2, label='PPI gradient, fixed λ')
         ax.axhline(mean.loc[('PP-SSL (online λ)', mu), 'mse'], color=AQUA, linewidth=2, label='PP-SSL (online λ)')
         ax.axhline(mean.loc[('Only Labeled', mu), 'mse'], color=BLUE, linewidth=1.4, label='Only Labeled')
-        ax.set(title=f'Fixed-λ sweep at μ = {mu:g}', xlabel='fixed λ', ylabel='Test MSE (all rows)')
+        ax.set(title=f'Effect of λ (μ = {mu:g})', xlabel='fixed λ', ylabel='Test MSE (all rows)')
         ax.grid(alpha=.18)
-    finish(fig, axes, f"PP-SSL anchor (Shoham et al., NeurIPS 2025): two-group synthetic regression, n = {SETUP['n']}, "
-           f"N = {SETUP['N']}; linear model, Adam lr {SETUP['adam_lr']:g}, {SETUP['steps']:,} steps", 'ppssl_replication.png')
+    finish(fig, axes, 'PP-SSL: Synthetic Regression', 'ppssl_replication.png')
     table = check_targets(runs.loc[runs.method != 'best fixed λ'])
     table.to_csv(RESULTS_DIR/'ppssl_replication_checks.csv', index=False, float_format='%.5f')
     print('Saved: results/ppssl_replication_checks.csv')
