@@ -6,3 +6,6 @@ __pycache__/
 *.sqlite-wal
 *.sqlite-shm
 /results/index.html
+.gitignore
+eda.ipynb
+/proposal
