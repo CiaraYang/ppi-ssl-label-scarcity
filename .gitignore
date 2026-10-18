@@ -5,3 +5,4 @@ __pycache__/
 *.sqlite-journal
 *.sqlite-wal
 *.sqlite-shm
+/results/index.html
